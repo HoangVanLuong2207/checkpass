@@ -1509,16 +1509,32 @@ def run_batch_core(
     if stop_event is None:
         stop_event = threading.Event()
     rows: list[dict[str, str]] = []
-    with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="sso-batch") as executor:
-        futures = [
-            executor.submit(batch_check_one, credential, tcp_module, timeout, gate, stop_event)
-            for credential in credentials
-        ]
-        for future in as_completed(futures):
-            row = future.result()
-            rows.append(row)
-            if on_result is not None:
-                on_result(row)
+    chunk_size = max(1, workers * 3)
+    total = len(credentials)
+    for start in range(0, total, chunk_size):
+        if stop_event.is_set():
+            break
+        chunk = credentials[start:start + chunk_size]
+        with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="sso-batch") as executor:
+            futures = [
+                executor.submit(batch_check_one, credential, tcp_module, timeout, gate, stop_event)
+                for credential in chunk
+            ]
+            for future in as_completed(futures):
+                if stop_event.is_set():
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    row = future.result()
+                except Exception:
+                    row = {"stt": "-", "account": "-", "status": "FAIL", "error": "thread crashed"}
+                rows.append(row)
+                done = len(rows)
+                if done % 50 == 0 or done == total:
+                    print(f"[batch] {done}/{total} done", flush=True)
+                if on_result is not None:
+                    on_result(row)
     return rows
 
 
@@ -1528,9 +1544,20 @@ def _batch_worker(
     workers: int,
     gap: float,
 ) -> None:
+    saved_count = 0
+
     def on_result(row: dict[str, str]) -> None:
+        nonlocal saved_count
         with server.batch_lock:
             server.batch_rows.append(row)
+            current_count = len(server.batch_rows)
+        if current_count - saved_count >= 50:
+            try:
+                with server.batch_lock:
+                    db.save_batch(list(server.batch_rows), getattr(server, 'batch_required_level', 12))
+                saved_count = current_count
+            except Exception as exc:
+                print(f"[db] save error: {exc}", flush=True)
 
     try:
         run_batch_core(
@@ -1542,7 +1569,8 @@ def _batch_worker(
             stop_event=server.batch_stopped,
             on_result=on_result,
         )
-    except Exception:
+    except Exception as exc:
+        print(f"[batch] worker error: {exc}", flush=True)
         traceback.print_exc()
         with server.batch_lock:
             server.batch_rows.append({
@@ -1561,8 +1589,9 @@ def _batch_worker(
             server.batch_running = False
             try:
                 db.save_batch(list(server.batch_rows), getattr(server, 'batch_required_level', 12))
-            except Exception:
-                pass
+                print(f"[db] saved final: {len(server.batch_rows)} rows", flush=True)
+            except Exception as exc:
+                print(f"[db] final save error: {exc}", flush=True)
 
 
 def run_batch(args: argparse.Namespace) -> int:
