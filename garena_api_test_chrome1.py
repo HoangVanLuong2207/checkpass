@@ -61,6 +61,9 @@ PII_PARTS = ("phone", "mobile", "email", "identity", "passport", "cmnd", "cccd",
 ACCOUNT_VISIBLE_PII = frozenset({"email", "email_v", "email_verified", "email_verify"})
 MAX_BATCH_BODY = 512 * 1024
 MAX_BATCH_ACCOUNTS = 10**18
+ACCOUNT_MAX_ATTEMPTS = 3
+KIENTUONG_MAX_RETRIES = 2
+KIENTUONG_MAX_ATTEMPTS = 1 + KIENTUONG_MAX_RETRIES
 
 
 def resilient_tcp_client_type(tcp_module: Any) -> type:
@@ -106,10 +109,14 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
                             0x101: "LOGIN",
                             0x1BA: "SSO_KEY_GET",
                         }.get(command, "UNKNOWN")
-                        raise tcp_module.GarenaError(
+                        rejection = tcp_module.GarenaError(
                             f"Garena từ chối ở bước {command_name} "
                             f"(lệnh 0x{command:X}), mã {result}"
                         )
+                        rejection.garena_rejected = True
+                        rejection.garena_command = command
+                        rejection.garena_result = result
+                        raise rejection
                     return reply
             finally:
                 self.socket.settimeout(previous_timeout)
@@ -121,6 +128,38 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
 
     ResilientGarenaTcpClient.__name__ = "ResilientGarenaTcpClient"
     return ResilientGarenaTcpClient
+
+
+def tcp_login_was_rejected(error: Any) -> bool:
+    """Only an explicit Garena TCP rejection proves the credentials are wrong."""
+
+    if bool(getattr(error, "garena_rejected", False)):
+        return True
+    message = str(error or "").strip().casefold()
+    ascii_message = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", message)
+        if not unicodedata.combining(char)
+    )
+    explicitly_rejected = "tu choi" in ascii_message or "rejected" in ascii_message
+    return "garena" in ascii_message and explicitly_rejected
+
+
+def api_failure_text(result: Any, fallback: str) -> str:
+    """Extract a useful, non-secret error from an API result."""
+
+    if not isinstance(result, dict):
+        return fallback
+    direct = str(result.get("error") or "").strip()
+    if direct:
+        return direct
+    body = result.get("body")
+    if isinstance(body, dict):
+        for key in ("error", "message", "error_message"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                return value
+    return fallback
 
 
 def fingerprint(value: str) -> str:
@@ -368,8 +407,7 @@ class WebSession:
                 status, prelogin = 0, None
             if status == 200 and isinstance(prelogin, dict) and not prelogin.get("error"):
                 break
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+            # Retry immediately; the HTTP request timeout already bounds each attempt.
         if status != 200 or not isinstance(prelogin, dict) or prelogin.get("error"):
             return {
                 "ok": False,
@@ -445,8 +483,7 @@ class WebSession:
                 status, init = 0, None
             if status == 200 and isinstance(init, dict) and not init.get("error"):
                 break
-            if attempt < 2:
-                time.sleep(1.5 * (attempt + 1))
+            # Retry immediately; the HTTP request timeout already bounds each attempt.
         if status != 200 or not isinstance(init, dict) or init.get("error"):
             return ({
                 "ok": False,
@@ -536,28 +573,31 @@ class WebSession:
 
 
 def fetch_latest_lien_quan_login(
-    session: WebSession, account_init: dict[str, Any], max_pages: int = 5
+    session: WebSession, account_init: dict[str, Any]
 ) -> dict[str, Any]:
-    """Search recent Account Center login pages for the newest Liên Quân entry."""
+    """Read the complete available history and return the newest Liên Quân entry."""
 
     current_result = account_init
     seen_cursors: set[tuple[str, str]] = set()
     pages_checked = 0
+    logs_checked = 0
     exhausted = False
+    pagination_stalled = False
+    newest_match: dict[str, Any] | None = None
 
-    while pages_checked < max_pages:
+    while True:
         body = current_result.get("body") or {}
         if not current_result.get("ok") or not isinstance(body, dict):
             break
         pages_checked += 1
-        match = latest_lien_quan_login(body.get("login_history"))
+        page_logs = body.get("login_history")
+        if isinstance(page_logs, list):
+            logs_checked += len(page_logs)
+        match = latest_lien_quan_login(page_logs)
         if match:
-            return {
-                "found": True,
-                "entry": match,
-                "pages_checked": pages_checked,
-                "history_exhausted": False,
-            }
+            newest_match = latest_lien_quan_login(
+                [item for item in (newest_match, match) if item is not None]
+            )
 
         last_login_ts = body.get("last_login_ts")
         last_im_ts = body.get("last_im_ts")
@@ -570,8 +610,11 @@ def fetch_latest_lien_quan_login(
             if value not in (None, "", 0, "0")
         }
         cursor = (str(last_login_ts or ""), str(last_im_ts or ""))
-        if not params or cursor in seen_cursors:
+        if not params:
             exhausted = True
+            break
+        if cursor in seen_cursors:
+            pagination_stalled = True
             break
         seen_cursors.add(cursor)
         current_result = session.api_result(
@@ -582,10 +625,12 @@ def fetch_latest_lien_quan_login(
         )
 
     return {
-        "found": False,
-        "entry": None,
+        "found": newest_match is not None,
+        "entry": newest_match,
         "pages_checked": pages_checked,
+        "logs_checked": logs_checked,
         "history_exhausted": exhausted,
+        "pagination_stalled": pagination_stalled,
     }
 
 
@@ -890,25 +935,55 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         client_type = resilient_tcp_client_type(tcp_module)
         with client_type(timeout=timeout) as client:
             uid = int(client.login(account, password))
-            sso = client.get_sso_key()
-            ignored_commands = list(client.ignored_server_commands)
-        results["tcp"] = {
-            "ok": True,
-            "account": account,
-            "uid": uid,
-            "session_key_bytes": 16,
-            "sso_key": f"<redacted sha256:{fingerprint(str(sso.sso_key))}>",
-            "sso_expiry_time": int(sso.expiry_time),
-            "web_sso_key": str(sso.sso_key),
-            "ignored_server_commands": [f"0x{item:X}" for item in ignored_commands],
-        }
+            # UID is the authoritative credential result.  Do not lose it merely
+            # because the optional SSO_KEY_GET command fails afterwards.
+            results["tcp"] = {
+                "ok": True,
+                "credential_rejected": False,
+                "account": account,
+                "uid": uid,
+                "session_key_bytes": len(client.session_key or b""),
+                "ignored_server_commands": [],
+            }
+            try:
+                sso = client.get_sso_key()
+            except Exception as exc:
+                results["tcp"]["sso_error"] = (
+                    str(exc).strip() or type(exc).__name__
+                )[:500]
+            else:
+                results["tcp"].update(
+                    {
+                        "sso_key": f"<redacted sha256:{fingerprint(str(sso.sso_key))}>",
+                        "sso_expiry_time": int(sso.expiry_time),
+                        "web_sso_key": str(sso.sso_key),
+                    }
+                )
+            results["tcp"]["ignored_server_commands"] = [
+                f"0x{item:X}" for item in client.ignored_server_commands
+            ]
     except Exception as exc:
-        results["tcp"]["error"] = (str(exc).strip() or type(exc).__name__)[:500]
+        message = (str(exc).strip() or type(exc).__name__)[:500]
+        results["tcp"].update(
+            {
+                "error": message,
+                "credential_rejected": tcp_login_was_rejected(exc),
+            }
+        )
 
     tcp_ok = bool(results["tcp"].get("ok"))
+    results["credential_valid"] = True if tcp_ok else (
+        False if results["tcp"].get("credential_rejected") else None
+    )
+    if results["tcp"].get("credential_rejected"):
+        results["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        password = ""
+        return results
+
     account_init: dict[str, Any] = {}
     player_api: dict[str, Any] = {}
-    if tcp_ok:
+    oauth_chain: dict[str, Any] = {}
+    if tcp_ok and sso is not None:
         try:
             probe = legacy_account_sso_probe(str(sso.sso_key), int(sso.expiry_time), timeout)
         except Exception as exc:
@@ -948,30 +1023,34 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
 
     account_ok = bool(account_init.get("ok"))
     kientuong_ok = bool(player_api.get("ok"))
-    if not tcp_ok or (not account_ok and not kientuong_ok):
+    if not account_ok:
         account_timeout = min(timeout, 10.0)
-        account_session = WebSession(account_timeout)
-        try:
-            account_auth = web_account_center_login(account_session, account, password)
-        except Exception as exc:
-            timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
-            account_auth = {
-                "ok": False,
-                "stage": "account_sso",
-                "error": f"timeout {account_timeout:.0f}s" if timed_out else (
-                    str(exc).strip() or type(exc).__name__
-                )[:500],
-            }
+        account_auth: dict[str, Any] = {}
+        for account_attempt in range(1, ACCOUNT_MAX_ATTEMPTS + 1):
+            account_session = WebSession(account_timeout)
+            try:
+                account_auth = web_account_center_login(account_session, account, password)
+            except Exception as exc:
+                timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
+                account_auth = {
+                    "ok": False,
+                    "stage": "account_sso",
+                    "error": f"timeout {account_timeout:.0f}s" if timed_out else (
+                        str(exc).strip() or type(exc).__name__
+                    )[:500],
+                }
+            account_auth["attempts"] = account_attempt
+            if account_auth.get("ok"):
+                break
         results["web_auth"]["account_center"] = account_auth
-        if not account_ok:
-            results["apis"]["account_init"] = account_auth.get("account_init") or {
-                "ok": False,
-                "status": account_auth.get("status", 0),
-                "error": account_auth.get("error") or "account_sso_login_failed",
-            }
+        results["apis"]["account_init"] = account_auth.get("account_init") or {
+            "ok": False,
+            "status": account_auth.get("status", 0),
+            "error": account_auth.get("error") or "account_sso_login_failed",
+        }
 
+    if not kientuong_ok:
         kientuong_timeout = 5.0
-        session = WebSession(kientuong_timeout)
         kientuong_params = {
             "client_id": "100054",
             "redirect_uri": "https://kientuong.lienquan.garena.vn/auth/login/callback",
@@ -981,34 +1060,52 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         }
 
         def _do_kientuong() -> tuple[dict[str, Any], dict[str, Any]]:
+            session = WebSession(kientuong_timeout)
             ka, _ = session.oauth_callback(
                 account, password, kientuong_params, ensure_login=False
             )
             ka.pop("_callback_values", None)
+            if not ka.get("ok"):
+                return ka, {
+                    "ok": False,
+                    "error": api_failure_text(ka, "kientuong_failed"),
+                }
             wp = session.api_result(
                 "https://kientuong.lienquan.garena.vn/api/player/get",
                 headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
             )
+            if not wp.get("ok"):
+                wp["error"] = api_failure_text(wp, "kientuong_failed")
             return ka, wp
 
-        try:
-            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="kt-timeout") as pool:
-                future = pool.submit(_do_kientuong)
-                kientuong_auth, web_player = future.result(timeout=kientuong_timeout)
-        except Exception as exc:
-            timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
-            kientuong_auth = {
-                "ok": False,
-                "stage": "kientuong_oauth",
-                "error": "timeout 5s - Chưa tạo nhân vật" if timed_out else (
+        # The SSO probe above already counts as one Kiện Tướng attempt when it
+        # reached the OAuth chain.  Across all paths, retry at most two times.
+        kientuong_attempts = 1 if oauth_chain else 0
+        kientuong_auth = results["web_auth"].get("kientuong") or {}
+        web_player = player_api or {"ok": False, "error": "kientuong_failed"}
+        while kientuong_attempts < KIENTUONG_MAX_ATTEMPTS and not web_player.get("ok"):
+            kientuong_attempts += 1
+            try:
+                kientuong_auth, web_player = _do_kientuong()
+            except Exception as exc:
+                timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
+                error = "timeout 5s" if timed_out else (
                     str(exc).strip() or type(exc).__name__
-                )[:500],
-            }
-            web_player = {"ok": False, "error": "Chưa tạo nhân vật"}
+                )[:500]
+                kientuong_auth = {
+                    "ok": False,
+                    "stage": "kientuong_oauth",
+                    "error": error,
+                }
+                web_player = {"ok": False, "error": error}
 
+        kientuong_auth["attempts"] = kientuong_attempts
+        kientuong_auth["max_retries"] = KIENTUONG_MAX_RETRIES
+        kientuong_auth["retry_exhausted"] = bool(
+            not web_player.get("ok") and kientuong_attempts >= KIENTUONG_MAX_ATTEMPTS
+        )
         results["web_auth"]["kientuong"] = kientuong_auth
-        if not kientuong_ok:
-            results["apis"]["kientuong_player"] = web_player
+        results["apis"]["kientuong_player"] = web_player
 
     password = ""
     results["elapsed_ms"] = round((time.monotonic() - started) * 1000)
@@ -1019,6 +1116,11 @@ def format_user_output(result: dict[str, Any]) -> str:
     """Return only account and Kiện Tướng data on one ``||``-delimited line."""
 
     tcp = result.get("tcp") or {}
+    if tcp.get("credential_rejected"):
+        return (
+            f"Tài khoản: {str(tcp.get('account') or 'không có')}"
+            " || Trạng thái: FALSE || Lỗi: sai tài khoản hoặc mật khẩu (TCP từ chối)"
+        )
     apis = result.get("apis") or {}
     web_auth = result.get("web_auth") or {}
     probe = result.get("tcp_to_web_probe") or {}
@@ -1071,9 +1173,13 @@ def format_user_output(result: dict[str, Any]) -> str:
         )
 
     oauth_chain = probe.get("account_to_kientuong_oauth") or {}
-    kientuong_payload, kientuong_player = player_from(apis.get("kientuong_player") or {})
+    kientuong_result = apis.get("kientuong_player") or {}
+    kientuong_payload, kientuong_player = player_from(kientuong_result)
+    kientuong_checked = bool(kientuong_result.get("ok"))
     if not kientuong_player:
-        kientuong_payload, kientuong_player = player_from(oauth_chain.get("player_api") or {})
+        probe_player_result = oauth_chain.get("player_api") or {}
+        kientuong_payload, kientuong_player = player_from(probe_player_result)
+        kientuong_checked = kientuong_checked or bool(probe_player_result.get("ok"))
 
     account_auth = web_auth.get("account_center") or {}
     session_key_display: Any = account_auth.get("session_key")
@@ -1111,8 +1217,10 @@ def format_user_output(result: dict[str, Any]) -> str:
                 ("IP đăng nhập", latest_game_login.get("ip"), "không có"),
             ]
         )
+    elif isinstance(login_search, dict) and login_search.get("history_exhausted"):
+        fields.append(("Đăng nhập Liên Quân gần nhất", "OFF trên 1 tháng", "OFF trên 1 tháng"))
     else:
-        fields.append(("Đăng nhập Liên Quân gần nhất", "Không tìm thấy", "Không tìm thấy"))
+        fields.append(("Đăng nhập Liên Quân gần nhất", "Không đọc hết lịch sử", "Không đọc hết lịch sử"))
 
     if kientuong_player:
         game_id = (
@@ -1150,8 +1258,17 @@ def format_user_output(result: dict[str, Any]) -> str:
                     "không rõ",
                 )
             )
-    else:
+    elif kientuong_checked:
         fields.append(("Kiện Tướng", "Chưa tạo nhân vật", "Chưa tạo nhân vật"))
+    else:
+        kientuong_auth = web_auth.get("kientuong") or {}
+        error = api_failure_text(
+            kientuong_result,
+            api_failure_text(kientuong_auth, "kientuong_failed"),
+        )
+        attempts = int(kientuong_auth.get("attempts") or 0)
+        retry_note = f" sau {attempts} lần kiểm tra" if attempts else ""
+        fields.append(("Kiện Tướng", f"Lỗi {error}{retry_note}", "kientuong_failed"))
 
     return " || ".join(
         f"{label}: {clean(value, fallback)}" for label, value, fallback in fields
@@ -1185,9 +1302,15 @@ def mask_batch_session_key(value: Any, visible: int = 8) -> str:
 BATCH_FIELDNAMES = [
     "stt", "account", "status", "uid", "email", "email_status", "mobile",
     "two_step", "authenticator", "session_key",
-    "name", "level", "player_status", "deletion_status", "elapsed_ms", "error",
+    "name", "level", "player_status", "deletion_status", "elapsed_ms",
     "latest_login", "login_ip",
 ]
+
+
+def public_batch_row(row: dict[str, Any]) -> dict[str, str]:
+    """Return only fields safe for UI, CSV, history APIs and persistence."""
+
+    return {field: str(row.get(field, "") or "") for field in BATCH_FIELDNAMES}
 
 REQUIRED_ACCOUNT_LABEL = "hồ sơ tài khoản"
 REQUIRED_SESSION_LABEL = "session_key"
@@ -1199,23 +1322,11 @@ BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
 def batch_login_rejected_permanently(result: Any) -> bool:
-    """True khi web API tự từ chối thông tin đăng nhập (sai mật khẩu/khóa acc).
-
-    Chỉ dừng retry khi TCP THẤT BẠI và web login cũng trả lỗi xác thực.
-    Nếu TCP thành công (có UID) thì KHÔNG dừng — acc có thể chưa tạo nhân vật.
-    """
+    """An explicit TCP rejection is the final wrong-password decision."""
 
     if not isinstance(result, dict):
         return False
-    tcp_ok = bool((result.get("tcp") or {}).get("ok"))
-    if tcp_ok:
-        return False
-    web_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
-    if web_auth.get("ok") or web_auth.get("challenge_required"):
-        return False
-    if str(web_auth.get("stage") or "") != "login":
-        return False
-    return bool(str(web_auth.get("error") or "").strip())
+    return bool((result.get("tcp") or {}).get("credential_rejected"))
 
 
 def batch_required_missing(result: Any) -> list[str]:
@@ -1301,6 +1412,9 @@ def batch_check_one(
     stop_event: threading.Event,
 ) -> dict[str, str]:
     started = time.monotonic()
+    input_account = str(getattr(credential, "account", ""))
+    account_info_found = False
+    kientuong_info_found = False
     row = {
         "stt": str(getattr(credential, "index", "")),
         "account": getattr(credential, "account", ""),
@@ -1320,10 +1434,12 @@ def batch_check_one(
         "session_key": "",
         "elapsed_ms": "0",
         "error": "",
+        "_credential": f"{input_account}|{credential.password}",
+        "_special": "",
     }
     if not gate.wait(stop_event):
-        row["error"] = "đã dừng trước khi gửi"
         credential.password = ""
+        row.pop("error", None)
         return row
     result: dict[str, Any] | None = None
     attempt_count = 0
@@ -1350,10 +1466,16 @@ def batch_check_one(
             result = current_result
             attempt_error = ""
             missing = batch_required_missing(current_result)
-            if not missing:
-                break
             if batch_login_rejected_permanently(current_result):
                 login_rejected = True
+                break
+            # Once TCP returns a UID, credentials are proven valid.  Account
+            # Center and Kiện Tướng already did their bounded retries inside
+            # run_api_tests; rerunning the whole pipeline would exceed the
+            # Kiện Tướng retry limit and needlessly repeat TCP login.
+            if (current_result.get("tcp") or {}).get("ok"):
+                break
+            if not missing:
                 break
             if len(missing) < 3:
                 has_partial = True
@@ -1402,6 +1524,7 @@ def batch_check_one(
         )
         if not user_info and isinstance(probe_init_body.get("user_info"), dict):
             user_info = probe_init_body.get("user_info") or {}
+        account_info_found = bool(user_info)
 
         probe_player = (
             oauth_chain.get("player_api")
@@ -1420,11 +1543,13 @@ def batch_check_one(
             else kientuong_body
         )
         player = payload.get("player") if isinstance(payload.get("player"), dict) else {}
+        kientuong_info_found = bool(player)
 
         email = user_info.get("email")
-        if not email:
+        email_status = ""
+        if user_info and not email:
             email_status = "Chưa liên kết"
-        else:
+        elif user_info:
             email_verified = next(
                 (
                     user_info[key]
@@ -1458,14 +1583,17 @@ def batch_check_one(
 
         row["account"] = str(user_info.get("username") or row["account"])
         row["uid"] = str(user_info.get("uid") or tcp_info.get("uid") or "")
-        row["email"] = str(email or "")
-        row["email_status"] = email_status
-        row["mobile"] = str(user_info.get("mobile_no") or "")
-        row["two_step"] = batch_yes_no(user_info.get("two_step_verify_enable"))
-        row["authenticator"] = batch_yes_no(user_info.get("authenticator_enable"))
+        if user_info:
+            row["email"] = str(email or "")
+            row["email_status"] = email_status
+            row["mobile"] = str(user_info.get("mobile_no") or "")
+            row["two_step"] = batch_yes_no(user_info.get("two_step_verify_enable"))
+            row["authenticator"] = batch_yes_no(user_info.get("authenticator_enable"))
         if latest_game_login:
             row["latest_login"] = format_login_timestamp(latest_game_login.get("timestamp"))
             row["login_ip"] = str(latest_game_login.get("ip") or "")
+        elif isinstance(login_search, dict) and login_search.get("history_exhausted"):
+            row["latest_login"] = "OFF trên 1 tháng"
         row["name"] = str(player.get("name") or "")
         row["level"] = str(player.get("level") or "")
         row["player_status"] = (
@@ -1480,15 +1608,20 @@ def batch_check_one(
         row["session_key"] = mask_batch_session_key(session_key)
 
         kientuong_ok = bool(kientuong_api.get("ok") or probe_player.get("ok"))
+        if kientuong_ok and not player:
+            row["player_status"] = "Chưa tạo nhân vật"
+        kientuong_auth = web_auth.get("kientuong") or {}
+        kientuong_retry_exhausted = bool(kientuong_auth.get("retry_exhausted"))
+        if not row["level"] and (kientuong_ok or kientuong_retry_exhausted):
+            row["level"] = "Ctnv"
         errors: list[str] = []
-        if not account_auth.get("ok"):
-            errors.append(str(account_auth.get("error") or "sso_login_failed"))
-        if not kientuong_ok:
-            kt_err = str(kientuong_api.get("error") or "")
-            if user_info:
-                errors.append("Chưa tạo nhân vật")
-            else:
-                errors.append(kt_err or "kientuong_failed")
+        if not login_rejected and not kientuong_ok:
+            kt_err = str(
+                kientuong_api.get("error")
+                or kientuong_auth.get("error")
+                or "kientuong_failed"
+            )
+            errors.append(kt_err)
         if tcp_info.get("error"):
             errors.append(str(tcp_info.get("error")))
         if attempt_error:
@@ -1502,8 +1635,7 @@ def batch_check_one(
         if login_rejected:
             errors.insert(
                 0,
-                "đăng nhập bị từ chối (sai mật khẩu hoặc tài khoản bị khóa), dừng thử lại sau "
-                + str(attempt_count) + " lần",
+                "FALSE - sai tài khoản hoặc mật khẩu (TCP từ chối), dừng ngay",
             )
             row["status"] = "FAIL"
         elif gave_up_reason:
@@ -1514,10 +1646,20 @@ def batch_check_one(
             )
             row["status"] = "FAIL"
         elif missing:
-            errors.append(
-                "chưa đọc được: " + ", ".join(missing) + f" (sau {attempt_count} lần thử)"
-            )
-            row["status"] = "FAIL"
+            reportable_missing = [
+                item
+                for item in missing
+                if item not in {REQUIRED_ACCOUNT_LABEL, REQUIRED_SESSION_LABEL}
+                and not (item == REQUIRED_KIENTUONG_LABEL and row["level"] == "Ctnv")
+            ]
+            if reportable_missing:
+                errors.append(
+                    "chưa đọc được: "
+                    + ", ".join(reportable_missing)
+                    + f" (sau {attempt_count} lần thử)"
+                )
+            if not tcp_info.get("ok") and reportable_missing:
+                row["status"] = "FAIL"
         elif retry_stopped and row["status"] == "OK":
             errors.append(f"dừng sớm sau khi đủ dữ liệu, đã kiểm tra {attempt_count} lần")
         if row["status"] == "FAIL":
@@ -1526,7 +1668,11 @@ def batch_check_one(
             dict.fromkeys(e for e in errors if e and e != "None")
         )[:300]
     row["elapsed_ms"] = str(round((time.monotonic() - started) * 1000))
+    if attempt_count and not account_info_found and not kientuong_info_found:
+        row["_special"] = "1"
     credential.password = ""
+    # Error codes are internal retry diagnostics only; never expose or persist them.
+    row.pop("error", None)
     return row
 
 
@@ -1565,7 +1711,7 @@ def run_batch_core(
                 try:
                     row = future.result()
                 except Exception:
-                    row = {"stt": "-", "account": "-", "status": "FAIL", "error": "thread crashed"}
+                    row = {"stt": "-", "account": "-", "status": "FAIL"}
                 rows.append(row)
                 done = len(rows)
                 if done % 50 == 0 or done == total:
@@ -1613,7 +1759,6 @@ def _batch_worker(
             server.batch_rows.append({
                 "stt": "-", "account": "-", "status": "FAIL", "uid": "", "name": "",
                 "level": "", "session_key": "", "elapsed_ms": "",
-                "error": "lỗi batch không mong muốn, xem console",
             })
     finally:
         for credential in credentials:
@@ -1667,7 +1812,10 @@ def run_batch(args: argparse.Namespace) -> int:
         with args.csv.open("w", encoding="utf-8-sig", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=BATCH_FIELDNAMES)
             writer.writeheader()
-            writer.writerows(sorted(rows, key=lambda item: int(item["stt"])))
+            writer.writerows(
+                public_batch_row(row)
+                for row in sorted(rows, key=lambda item: int(item["stt"]))
+            )
         print(f"Đã ghi kết quả: {args.csv}")
     return 0 if len(rows) == len(credentials) else 1
 
@@ -1710,26 +1858,26 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <button id="batchStop" type="button" class="warnb">Dừng</button>
 <button id="batchExport" type="button" class="ghost">Xuất CSV</button>
 <button id="splitBtn" type="button" class="ghost" disabled>Chia lọc theo cấp độ</button>
-<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 2 tab</button>
+<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 3 tab</button>
 <label class="btnfile">Nhập file<input id="batchImport" type="file" accept=".txt,.csv,text/plain" hidden></label>
 <div id="batchFileName" class="fileinfo">Chưa chọn file.</div>
 <div id="batchStatus">Chưa chạy.</div>
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
-<div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Lỗi</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
+<div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Nếu sau ~25 giây (hoặc 5 lần thử) chưa đọc được chút dữ liệu nào sẽ báo "nghi sai pass hoặc tài khoản có vấn đề, xin tự kiểm tra"; đã đọc được dữ liệu một phần mà thiếu nhóm (hồ sơ tài khoản, session key, Kiện Tướng) thì thử lại đến khi đủ mới tính xong. SĐT, đăng nhập LQ gần nhất và IP đăng nhập nếu không có sẽ bỏ qua. Web API trả lời rõ là sai mật khẩu/khóa acc thì dừng thử ngay. Bấm "Dừng" để kết thúc sớm. "Xuất CSV" tải file gồm đủ các cột trên; khi nhập file, chỉ tên file được hiển thị và danh sách không được đưa vào ô bên trên.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần, nếu vẫn không có cấp độ thì cột Cấp độ ghi <code>Ctnv</code>. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có ba tab Đạt, Không đạt và Đặc biệt; cột Tài khoản trong cả ba tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
 <div style="display:flex;gap:18px;flex-wrap:wrap">
 <div style="flex:1;min-width:300px">
 <h3 style="color:#56d364;margin:0 0 8px;font-size:14px">✅ Đạt yêu cầu (<span id="metCount">0</span> acc)</h3>
-<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th><th>Lỗi</th></tr></thead>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th></tr></thead>
 <tbody id="metBody"></tbody></table></div>
 </div>
 <div style="flex:1;min-width:300px">
 <h3 style="color:#ff7b72;margin:0 0 8px;font-size:14px">❌ Không đạt (<span id="notMetCount">0</span> acc)</h3>
-<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th><th>Lỗi</th></tr></thead>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th></tr></thead>
 <tbody id="notMetBody"></tbody></table></div>
 </div>
 </div>
@@ -1757,13 +1905,13 @@ const $=id=>document.getElementById(id);
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 async function postJson(url,body){try{const r=await fetch(url,{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-API-Test-Token':token},body:JSON.stringify(body)});return await r.json();}catch(e){return{ok:false,error:'Lỗi localhost: '+e}}}
 async function getState(){const r=await fetch('/api/batch/state',{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});return r.json();}
-let pollTimer=null,rendered=0,lastRows=[],batchFileText='',batchFileName='';
+ let pollTimer=null,rendered=0,lastRows=[],batchFileText='',batchFileName='',selectedHistoryRunId=null;
 function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.className=bad?'bad':'';}
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
-function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.email,r.email_status,r.mobile,r.two_step,r.authenticator,r.session_key,r.name,r.level,r.player_status,r.deletion_status,r.elapsed_ms,r.error,r.latest_login,r.login_ip].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
+function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.email,r.email_status,r.mobile,r.two_step,r.authenticator,r.session_key,r.name,r.level,r.player_status,r.deletion_status,r.elapsed_ms,r.latest_login,r.login_ip].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
 async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
-function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.name,r.level,r.player_status,r.session_key,r.error].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
+function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.name,r.level,r.player_status,r.session_key].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
 $('splitBtn').addEventListener('click',async()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
  const lv=parseInt($('requiredLevel').value,10)||12;
@@ -1782,7 +1930,7 @@ $('exportXlsxBtn').addEventListener('click',async()=>{
  const lv=parseInt($('requiredLevel').value,10)||12;
  setStatus('Đang tạo file XLSX...',false);
  try{
-  const res=await fetch('/api/batch/export-xlsx',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-API-Test-Token':token},body:JSON.stringify({required_level:lv})});
+  const res=await fetch('/api/batch/export-xlsx',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-API-Test-Token':token},body:JSON.stringify({required_level:lv,run_id:selectedHistoryRunId||0})});
   if(!res.ok){const j=await res.json().catch(()=>({}));setStatus(j.error||'Lỗi xuất XLSX',true);return;}
   const blob=await res.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='ketqua_cap_do.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);setStatus('Đã tải file XLSX',false);
  }catch(e){setStatus('Lỗi xuất: '+e,true);}
@@ -1791,14 +1939,14 @@ $('batchStart').addEventListener('click',async()=>{
  const accounts=batchFileText||$('batchAccounts').value;
  const res=await postJson('/api/batch/start',{accounts,workers:parseInt($('batchWorkers').value,10)||2,gap:parseFloat($('batchGap').value)||0,required_level:parseInt($('requiredLevel').value,10)||12});
  if(!res.ok){setStatus(res.error||'Không bắt đầu được',true);return;}
- $('batchBody').innerHTML='';rendered=0;lastRows=[];$('batchStart').disabled=true;setStatus('Đang chạy...',false);$('batchTiming').textContent='Thời gian: 00 phút 00 giây';
+ $('batchBody').innerHTML='';rendered=0;lastRows=[];selectedHistoryRunId=null;$('batchStart').disabled=true;setStatus('Đang chạy...',false);$('batchTiming').textContent='Thời gian: 00 phút 00 giây';
  if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(poll,900);poll();});
 $('batchStop').addEventListener('click',()=>{postJson('/api/batch/stop',{});setStatus('Đang dừng sau các acc đang xử lý...',false);});
 $('batchAccounts').addEventListener('input',()=>{if($('batchAccounts').value){batchFileText='';batchFileName='';$('batchFileName').textContent='Chưa chọn file (đang dùng nội dung nhập tay).';}});
 $('batchImport').addEventListener('change',ev=>{const f=ev.target.files&&ev.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{batchFileText=String(rd.result||'');batchFileName=f.name;$('batchAccounts').value='';$('batchFileName').textContent='Đã chọn file: '+batchFileName;setStatus('Đã nạp file, nội dung được giữ ẩn.',false);};rd.onerror=()=>{batchFileText='';batchFileName='';$('batchFileName').textContent='Không đọc được file.';setStatus('Không đọc được file đã chọn.',true);};rd.readAsText(f,'utf-8');ev.target.value='';});
 $('batchExport').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả để xuất',true);return;}
-   const cols=['stt','account','status','uid','email','email_status','mobile','two_step','authenticator','session_key','name','level','player_status','deletion_status','elapsed_ms','error','latest_login','login_ip'];
+   const cols=['stt','account','status','uid','email','email_status','mobile','two_step','authenticator','session_key','name','level','player_status','deletion_status','elapsed_ms','latest_login','login_ip'];
  const q=v=>{v=String(v==null?'':v);return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
  const csv='\ufeff'+cols.join(',')+'\n'+lastRows.map(r=>cols.map(c=>q(r[c])).join(',')).join('\r\n');
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='ketqua_batch.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);});
@@ -1832,7 +1980,7 @@ async function viewHistory(id){
   const r=await fetch('/api/history/'+id,{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});
   const d=await r.json();
   if(!d.ok){alert('Không đọc được');return;}
-  lastRows=d.rows;rendered=0;$('batchBody').innerHTML='';renderRows(d.rows);
+   lastRows=d.rows;selectedHistoryRunId=id;rendered=0;$('batchBody').innerHTML='';renderRows(d.rows);
   setStatus('Đã tải lịch sử #'+id+': '+d.rows.length+' acc',false);
   window.scrollTo({top:0,behavior:'smooth'});
  }catch(e){alert('Lỗi: '+e);}
@@ -1958,7 +2106,7 @@ class Handler(BaseHTTPRequestHandler):
                     "stopped": self.server.batch_stopped.is_set(),
                     "total": self.server.batch_total,
                     "elapsed_ms": elapsed_ms,
-                    "rows": [dict(row) for row in self.server.batch_rows],
+                    "rows": [public_batch_row(row) for row in self.server.batch_rows],
                 }
             self.send_json(HTTPStatus.OK, payload);return
         if self.path != "/":
@@ -2046,7 +2194,7 @@ class Handler(BaseHTTPRequestHandler):
             except (UnicodeDecodeError,json.JSONDecodeError,TypeError,ValueError):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
             with self.server.batch_lock:
-                rows=[dict(r) for r in self.server.batch_rows]
+                rows=[public_batch_row(r) for r in self.server.batch_rows]
             met,not_met=[],[]
             for r in rows:
                 lv=r.get("level","").strip()
@@ -2066,10 +2214,14 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body=json.loads(self.rfile.read(length).decode("utf-8"))
                 required_level=int(body.get("required_level",12))
+                run_id=int(body.get("run_id") or 0)
             except (UnicodeDecodeError,json.JSONDecodeError,TypeError,ValueError):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
-            with self.server.batch_lock:
-                rows=[dict(r) for r in self.server.batch_rows]
+            if run_id > 0:
+                rows=db.get_run_rows_for_export(run_id)
+            else:
+                with self.server.batch_lock:
+                    rows=[dict(r) for r in self.server.batch_rows]
             met,not_met=[],[]
             for r in rows:
                 lv=r.get("level","").strip()
@@ -2084,9 +2236,22 @@ class Handler(BaseHTTPRequestHandler):
                 header_font=Font(bold=True,color="FFFFFF")
                 header_fill=PatternFill(start_color="238636",end_color="238636",fill_type="solid")
                 not_met_fill=PatternFill(start_color="9e6a03",end_color="9e6a03",fill_type="solid")
-                col_names=["stt","account","status","uid","email","email_status","mobile","two_step","authenticator","session_key","name","level","player_status","deletion_status","elapsed_ms","error","latest_login","login_ip"]
-                col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Email","Xác thực email","SĐT","2FA","Authenticator","Session Key","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms","Lỗi","Đăng nhập LQ gần nhất","IP đăng nhập"]
-                for idx,data_list,label,fill in [(0,met,"Đạt",header_fill),(1,not_met,"Không đạt",not_met_fill)]:
+                special_fill=PatternFill(start_color="8250df",end_color="8250df",fill_type="solid")
+                col_names=["stt","account","status","uid","email","email_status","mobile","two_step","authenticator","session_key","name","level","player_status","deletion_status","elapsed_ms","latest_login","login_ip"]
+                col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Email","Xác thực email","SĐT","2FA","Authenticator","Session Key","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms","Đăng nhập LQ gần nhất","IP đăng nhập"]
+                special=[]
+                for row in rows:
+                    credential=str(row.get("_credential") or "")
+                    if credential and str(row.get("_special") or "") == "1":
+                        special_row=public_batch_row(row)
+                        special_row["account"]=credential
+                        special.append(special_row)
+                sheets=[
+                    (0,met,"Đạt",header_fill),
+                    (1,not_met,"Không đạt",not_met_fill),
+                    (2,special,"Đặc biệt",special_fill),
+                ]
+                for idx,data_list,label,fill in sheets:
                     ws=wb.active if idx==0 else wb.create_sheet()
                     ws.title=label
                     for c,col_label in enumerate(col_labels,1):
@@ -2094,7 +2259,10 @@ class Handler(BaseHTTPRequestHandler):
                         cell.font=header_font;cell.fill=fill;cell.alignment=Alignment(horizontal="center")
                     for ri,row in enumerate(data_list,2):
                         for ci,col_name in enumerate(col_names,1):
-                            ws.cell(row=ri,column=ci,value=row.get(col_name,""))
+                            value=row.get(col_name,"")
+                            if col_name == "account":
+                                value=row.get("_credential") or value
+                            ws.cell(row=ri,column=ci,value=value)
                     for c in range(1,len(col_labels)+1):
                         ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width=max(12,len(col_labels[c-1])+2)
                 import io
@@ -2129,7 +2297,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.TOO_MANY_REQUESTS, {"ok": False, "error": "Đang có lần kiểm tra khác"});return
         try:
             result=run_api_tests(self.server.tcp_module,account,password,self.server.tcp_timeout)
-            self.send_json(HTTPStatus.OK, {"ok": True, "display": format_user_output(result)})
+            rejected=bool((result.get("tcp") or {}).get("credential_rejected"))
+            self.send_json(HTTPStatus.OK, {"ok": not rejected, "display": format_user_output(result)})
         except Exception as exc:
             self.send_json(HTTPStatus.OK, {"ok": False, "error": (str(exc).strip() or type(exc).__name__)[:500]})
         finally:
