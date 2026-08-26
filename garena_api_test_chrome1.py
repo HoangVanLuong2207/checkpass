@@ -1948,8 +1948,8 @@ class Handler(BaseHTTPRequestHandler):
                 required_level=int(body.get("required_level", 12))
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
-            if not 1 <= workers <= 8:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Số luồng phải trong khoảng 1..8 (500MB RAMserver khuyên 5-8)"});return
+            if not 1 <= workers <= 9999:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Số luồng phải trong khoảng 1..9999"});return
             if not 0 <= gap <= 60:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Gap phải trong khoảng 0..60 giây"});return
             try:
