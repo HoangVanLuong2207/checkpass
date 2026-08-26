@@ -949,14 +949,18 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
     account_ok = bool(account_init.get("ok"))
     kientuong_ok = bool(player_api.get("ok"))
     if not tcp_ok or not account_ok or not kientuong_ok:
-        account_session = WebSession(timeout)
+        account_timeout = min(timeout, 10.0)
+        account_session = WebSession(account_timeout)
         try:
             account_auth = web_account_center_login(account_session, account, password)
         except Exception as exc:
+            timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
             account_auth = {
                 "ok": False,
                 "stage": "account_sso",
-                "error": (str(exc).strip() or type(exc).__name__)[:500],
+                "error": f"timeout {account_timeout:.0f}s" if timed_out else (
+                    str(exc).strip() or type(exc).__name__
+                )[:500],
             }
         results["web_auth"]["account_center"] = account_auth
         if not account_ok:
@@ -966,7 +970,8 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
                 "error": account_auth.get("error") or "account_sso_login_failed",
             }
 
-        session = WebSession(timeout)
+        kientuong_timeout = 5.0
+        session = WebSession(kientuong_timeout)
         kientuong_params = {
             "client_id": "100054",
             "redirect_uri": "https://kientuong.lienquan.garena.vn/auth/login/callback",
@@ -974,22 +979,34 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "platform": "3",
             "locale": "vi-VN",
         }
-        try:
-            kientuong_auth, _ = session.oauth_callback(
+
+        def _do_kientuong() -> tuple[dict[str, Any], dict[str, Any]]:
+            ka, _ = session.oauth_callback(
                 account, password, kientuong_params, ensure_login=False
             )
+            ka.pop("_callback_values", None)
+            wp = session.api_result(
+                "https://kientuong.lienquan.garena.vn/api/player/get",
+                headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
+            )
+            return ka, wp
+
+        try:
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="kt-timeout") as pool:
+                future = pool.submit(_do_kientuong)
+                kientuong_auth, web_player = future.result(timeout=kientuong_timeout)
         except Exception as exc:
+            timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
             kientuong_auth = {
                 "ok": False,
                 "stage": "kientuong_oauth",
-                "error": (str(exc).strip() or type(exc).__name__)[:500],
+                "error": "timeout 5s - Chưa tạo nhân vật" if timed_out else (
+                    str(exc).strip() or type(exc).__name__
+                )[:500],
             }
-        kientuong_auth.pop("_callback_values", None)
+            web_player = {"ok": False, "error": "Chưa tạo nhân vật"}
+
         results["web_auth"]["kientuong"] = kientuong_auth
-        web_player = session.api_result(
-            "https://kientuong.lienquan.garena.vn/api/player/get",
-            headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
-        )
         if not kientuong_ok:
             results["apis"]["kientuong_player"] = web_player
 
@@ -1182,21 +1199,27 @@ BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
 def batch_login_rejected_permanently(result: Any) -> bool:
-    """True khi web API tự từ chối thông tin đăng nhập (sai mật khẩu/khóa acc).
+    """True khi acc đã login được TCP nhưng Account Center/Kiên Tướng đều fail vĩnh viễn.
 
-    Chỉ tin tín hiệu quyết định: API đăng nhập đã TRẢ LỜI ở bước login với
-    lỗi xác thực và không phải captcha/OTP. Khi đó retry sẽ không bao giờ
-    thành công nên dừng ngay, bất kể đường TCP hỏng thế nào.
+    TCP ok nhưng web probe + web fallback đều fail = acc không có dữ liệu
+    trên hệ thống, retry cũng không bao giờ có kết quả.
     """
 
     if not isinstance(result, dict):
         return False
-    web_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
-    if web_auth.get("ok") or web_auth.get("challenge_required"):
-        return False
-    if str(web_auth.get("stage") or "") != "login":
-        return False
-    return bool(str(web_auth.get("error") or "").strip())
+    tcp_ok = bool((result.get("tcp") or {}).get("ok"))
+    if not tcp_ok:
+        web_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
+        if web_auth.get("ok") or web_auth.get("challenge_required"):
+            return False
+        if str(web_auth.get("stage") or "") != "login":
+            return False
+        return bool(str(web_auth.get("error") or "").strip())
+    account_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
+    kientuong_auth = ((result.get("web_auth") or {}).get("kientuong")) or {}
+    if not account_auth.get("ok") and not kientuong_auth.get("ok"):
+        return True
+    return False
 
 
 def batch_required_missing(result: Any) -> list[str]:
@@ -1465,7 +1488,11 @@ def batch_check_one(
         if not account_auth.get("ok"):
             errors.append(str(account_auth.get("error") or "sso_login_failed"))
         if not kientuong_ok:
-            errors.append(str(kientuong_api.get("error") or "kientuong_failed"))
+            kt_err = str(kientuong_api.get("error") or "")
+            if user_info:
+                errors.append("Chưa tạo nhân vật")
+            else:
+                errors.append(kt_err or "kientuong_failed")
         if tcp_info.get("error"):
             errors.append(str(tcp_info.get("error")))
         if attempt_error:
