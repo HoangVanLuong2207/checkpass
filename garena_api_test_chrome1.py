@@ -59,7 +59,7 @@ SECRET_KEYS = {
 PII_PARTS = ("phone", "mobile", "email", "identity", "passport", "cmnd", "cccd", "id_card")
 ACCOUNT_VISIBLE_PII = frozenset({"email", "email_v", "email_verified", "email_verify"})
 MAX_BATCH_BODY = 512 * 1024
-MAX_BATCH_ACCOUNTS = 1000000
+MAX_BATCH_ACCOUNTS = 10**18
 
 
 def resilient_tcp_client_type(tcp_module: Any) -> type:
