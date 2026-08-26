@@ -948,7 +948,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
 
     account_ok = bool(account_init.get("ok"))
     kientuong_ok = bool(player_api.get("ok"))
-    if not tcp_ok or not account_ok or not kientuong_ok:
+    if not tcp_ok or (not account_ok and not kientuong_ok):
         account_timeout = min(timeout, 10.0)
         account_session = WebSession(account_timeout)
         try:
@@ -1199,27 +1199,23 @@ BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
 def batch_login_rejected_permanently(result: Any) -> bool:
-    """True khi acc đã login được TCP nhưng Account Center/Kiên Tướng đều fail vĩnh viễn.
+    """True khi web API tự từ chối thông tin đăng nhập (sai mật khẩu/khóa acc).
 
-    TCP ok nhưng web probe + web fallback đều fail = acc không có dữ liệu
-    trên hệ thống, retry cũng không bao giờ có kết quả.
+    Chỉ dừng retry khi TCP THẤT BẠI và web login cũng trả lỗi xác thực.
+    Nếu TCP thành công (có UID) thì KHÔNG dừng — acc có thể chưa tạo nhân vật.
     """
 
     if not isinstance(result, dict):
         return False
     tcp_ok = bool((result.get("tcp") or {}).get("ok"))
-    if not tcp_ok:
-        web_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
-        if web_auth.get("ok") or web_auth.get("challenge_required"):
-            return False
-        if str(web_auth.get("stage") or "") != "login":
-            return False
-        return bool(str(web_auth.get("error") or "").strip())
-    account_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
-    kientuong_auth = ((result.get("web_auth") or {}).get("kientuong")) or {}
-    if not account_auth.get("ok") and not kientuong_auth.get("ok"):
-        return True
-    return False
+    if tcp_ok:
+        return False
+    web_auth = ((result.get("web_auth") or {}).get("account_center")) or {}
+    if web_auth.get("ok") or web_auth.get("challenge_required"):
+        return False
+    if str(web_auth.get("stage") or "") != "login":
+        return False
+    return bool(str(web_auth.get("error") or "").strip())
 
 
 def batch_required_missing(result: Any) -> list[str]:
