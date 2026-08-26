@@ -879,16 +879,15 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
         }
 def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) -> dict[str, Any]:
     started = time.monotonic()
+    hard_timeout = timeout * 4
     results: dict[str, Any] = {
         "tcp": {"ok": False, "account": account},
         "apis": {},
         "web_auth": {},
     }
 
-    # TCP is the primary login path. Its SSO key is bridged into the web
-    # Account Center and Kien Tuong sessions before credential-based web login
-    # is considered as a per-service fallback.
-    try:
+    def _do_check() -> None:
+        nonlocal results
         client_type = resilient_tcp_client_type(tcp_module)
         with client_type(timeout=timeout) as client:
             uid = int(client.login(account, password))
@@ -907,8 +906,16 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         results["tcp_to_web_probe"] = legacy_account_sso_probe(
             str(sso.sso_key), int(sso.expiry_time), timeout
         )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="tcp-check") as pool:
+            future = pool.submit(_do_check)
+            future.result(timeout=hard_timeout)
     except Exception as exc:
-        results["tcp"]["error"] = (str(exc).strip() or type(exc).__name__)[:500]
+        if "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower():
+            results["tcp"]["error"] = f"timeout sau {hard_timeout:.0f}s"
+        else:
+            results["tcp"]["error"] = (str(exc).strip() or type(exc).__name__)[:500]
 
     probe = results.get("tcp_to_web_probe") or {}
     probe_account_init = probe.get("account_init") or {}
@@ -1305,6 +1312,7 @@ def batch_check_one(
     effective_timeout = min(float(timeout), BATCH_MAX_REQUEST_TIMEOUT)
     while True:
         attempt_count += 1
+        print(f"  [{credential.index}] #{credential.account[:20]} attempt {attempt_count}", flush=True)
         try:
             current_result = run_api_tests(
                 tcp_module, credential.account, credential.password, effective_timeout
