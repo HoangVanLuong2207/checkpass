@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+.env
+
+# File chua mat khau - TUYET DOI khong push
+accounts_probe.txt
+accounts*.txt
+check cho taooo.txt
+
+# Thu muc tool cu 139MB (chua exe/dll/adb, da co garena_tcp.py ban tai goc)
+TOOL AUTO UP LEVEL/
+
+# Ket qua batch local
+*.csv
+
+# Tool skin khong lien quan deploy
+sale_catalog_export.py
+skin.py
+skins.json
+XUAT_CATALOG_SKIN_SALE.cmd

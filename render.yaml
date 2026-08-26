@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: garena-check-tool
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python garena_api_test_chrome1.py --no-browser --timeout 20
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: API_TEST_PASSWORD
+        sync: false
