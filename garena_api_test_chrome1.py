@@ -1509,7 +1509,7 @@ def run_batch_core(
     if stop_event is None:
         stop_event = threading.Event()
     rows: list[dict[str, str]] = []
-    chunk_size = max(1, workers * 3)
+    chunk_size = max(1, min(workers * 3, 15))
     total = len(credentials)
     for start in range(0, total, chunk_size):
         if stop_event.is_set():
@@ -1665,7 +1665,7 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <p>Dán danh sách <code>user|pass</code> hoặc <code>user:pass</code>, mỗi dòng một tài khoản. Dòng trống hoặc bắt đầu bằng <code>#</code> bị bỏ qua.</p>
 <textarea id="batchAccounts" placeholder="user1|pass1&#10;user2|pass2&#10;user3:pass3"></textarea>
 <div class="row">
-<div><label>Số luồng</label><input id="batchWorkers" type="number" min="1" max="99999999" value="2"></div>
+<div><label>Số luồng (500MB RAM khuyên 5-8)</label><input id="batchWorkers" type="number" min="1" max="8" value="5"></div>
 <div><label>Gap giữa 2 lần đăng nhập (giây, 0–60)</label><input id="batchGap" type="number" min="0" max="60" step="0.5" value="3"></div>
 <div><label>Cấp độ yêu cầu</label><input id="requiredLevel" type="number" min="0" max="99" value="12"></div>
 </div>
@@ -1948,8 +1948,8 @@ class Handler(BaseHTTPRequestHandler):
                 required_level=int(body.get("required_level", 12))
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
-            if not 1 <= workers <= 9999999999999:
-                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Số luồng phải trong khoảng 1..8"});return
+            if not 1 <= workers <= 8:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Số luồng phải trong khoảng 1..8 (500MB RAMserver khuyên 5-8)"});return
             if not 0 <= gap <= 60:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Gap phải trong khoảng 0..60 giây"});return
             try:
