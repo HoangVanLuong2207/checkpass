@@ -879,7 +879,7 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
         }
 def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) -> dict[str, Any]:
     started = time.monotonic()
-    hard_timeout = timeout * 4
+    hard_timeout = BATCH_ROW_DEADLINE_SECONDS
     results: dict[str, Any] = {
         "tcp": {"ok": False, "account": account},
         "apis": {},
