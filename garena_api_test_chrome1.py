@@ -27,6 +27,7 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 import garena_tcp_login_chrome as tcp_ui
+import db
 
 
 MAX_BODY = 8 * 1024
@@ -1558,6 +1559,10 @@ def _batch_worker(
                     (time.monotonic() - server.batch_started_at) * 1000
                 )
             server.batch_running = False
+            try:
+                db.save_batch(list(server.batch_rows), getattr(server, 'batch_required_level', 12))
+            except Exception:
+                pass
 
 
 def run_batch(args: argparse.Namespace) -> int:
@@ -1673,6 +1678,12 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <small class="warn">Không vượt CAPTCHA/2FA. Email được hiển thị theo yêu cầu; SĐT, giấy tờ vẫn được che. Session Key SSO hiển thị khi đăng nhập thành công. Chỉ chạy tại 127.0.0.1.</small>
 </div>
 
+<div class="card" id="historyCard">
+<h2>Lịch sử check</h2>
+<div id="historyStatus" class="fileinfo">Đang tải...</div>
+<div id="historyList"></div>
+</div>
+
 </main>
 <script>
 const token=__TOKEN__;
@@ -1712,7 +1723,7 @@ $('exportXlsxBtn').addEventListener('click',async()=>{
 });
 $('batchStart').addEventListener('click',async()=>{
  const accounts=batchFileText||$('batchAccounts').value;
- const res=await postJson('/api/batch/start',{accounts,workers:parseInt($('batchWorkers').value,10)||2,gap:parseFloat($('batchGap').value)||0});
+ const res=await postJson('/api/batch/start',{accounts,workers:parseInt($('batchWorkers').value,10)||2,gap:parseFloat($('batchGap').value)||0,required_level:parseInt($('requiredLevel').value,10)||12});
  if(!res.ok){setStatus(res.error||'Không bắt đầu được',true);return;}
  $('batchBody').innerHTML='';rendered=0;lastRows=[];$('batchStart').disabled=true;setStatus('Đang chạy...',false);$('batchTiming').textContent='Thời gian: 00 phút 00 giây';
  if(pollTimer)clearInterval(pollTimer);pollTimer=setInterval(poll,900);poll();});
@@ -1731,6 +1742,45 @@ $('f').addEventListener('submit',async ev=>{ev.preventDefault();const b=$('b'),o
  out.className=data.ok?'ok':'bad';out.textContent=data.display||data.error||'Không có kết quả';
  input.value='';b.disabled=false;});
 (async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(!s.running){$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
+async function loadHistory(){
+ try{
+  const r=await fetch('/api/history',{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});
+  const d=await r.json();
+  if(!d.ok||!d.db_available){$('historyStatus').textContent='Database chưa kết nối (cần TURSO_URL + TURSO_TOKEN)';$('historyList').innerHTML='';return;}
+  if(!d.runs||!d.runs.length){$('historyStatus').textContent='Chưa có lịch sử.';$('historyList').innerHTML='';return;}
+  $('historyStatus').textContent='Tổng: '+d.runs.length+' lần check';
+  let h='<table style="width:100%;border-collapse:collapse;font-size:13px">';
+  h+='<tr style="color:#8b949e"><th style="padding:6px;text-align:left">ID</th><th>Thời gian</th><th>Tổng</th><th>Đạt</th><th>Không đạt</th><th>Cấp YT</th><th>ms</th><th></th><th></th></tr>';
+  d.runs.forEach(r=>{
+   const dt=new Date(r.created_at*1000);const ts=dt.toLocaleDateString('vi-VN')+' '+dt.toLocaleTimeString('vi-VN');
+   h+='<tr style="border-top:1px solid #21262d"><td style="padding:6px">'+r.id+'</td><td>'+ts+'</td><td>'+r.total+'</td><td style="color:#56d364">'+r.met+'</td><td style="color:#ff7b72">'+r.not_met+'</td><td>>='+r.required_level+'</td><td>'+r.elapsed_ms+'</td>';
+   h+='<td><button onclick="viewHistory('+r.id+')" style="padding:3px 8px;border:0;border-radius:4px;background:#238636;color:#fff;cursor:pointer;font-size:12px">Xem</button></td>';
+   h+='<td><button onclick="deleteHistory('+r.id+')" style="padding:3px 8px;border:0;border-radius:4px;background:#da3633;color:#fff;cursor:pointer;font-size:12px">Xóa</button></td></tr>';
+  });
+  h+='</table><button onclick="deleteAllHistory()" style="margin-top:8px;padding:6px 12px;border:0;border-radius:6px;background:#da3633;color:#fff;cursor:pointer;font-size:12px">Xóa tất cả lịch sử</button>';
+  $('historyList').innerHTML=h;
+ }catch(e){$('historyStatus').textContent='Lỗi tải lịch sử: '+e;}
+}
+async function viewHistory(id){
+ try{
+  const r=await fetch('/api/history/'+id,{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});
+  const d=await r.json();
+  if(!d.ok){alert('Không đọc được');return;}
+  lastRows=d.rows;rendered=0;$('batchBody').innerHTML='';renderRows(d.rows);
+  setStatus('Đã tải lịch sử #'+id+': '+d.rows.length+' acc',false);
+  window.scrollTo({top:0,behavior:'smooth'});
+ }catch(e){alert('Lỗi: '+e);}
+}
+async function deleteHistory(id){
+ if(!confirm('Xóa lịch sử #'+id+'?'))return;
+ await postJson('/api/history/'+id,{});loadHistory();
+}
+async function deleteAllHistory(){
+ if(!confirm('Xóa TẤT CẢ lịch sử?'))return;
+ await fetch('/api/history/all',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-API-Test-Token':token},body:JSON.stringify({confirm:true})});
+ loadHistory();
+}
+loadHistory();
 </script></body></html>'''
 
 
@@ -1801,6 +1851,17 @@ class Handler(BaseHTTPRequestHandler):
             self.deny_access();return
         if self.path == "/favicon.ico":
             self.send_response(HTTPStatus.NO_CONTENT);self.end_headers();return
+        if self.path.startswith("/api/history"):
+            if not self.authorized():self.deny_access();return
+            if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:
+                self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
+            parts = self.path.strip("/").split("/")
+            if len(parts) == 3 and parts[1] == "history" and parts[2].isdigit():
+                run_id = int(parts[2])
+                rows = db.get_run_rows(run_id)
+                self.send_json(HTTPStatus.OK, {"ok": True, "rows": rows});return
+            runs = db.list_runs()
+            self.send_json(HTTPStatus.OK, {"ok": True, "runs": runs, "db_available": db.is_available()});return
         if self.path == "/api/batch/state":
             if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:
                 self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
@@ -1840,6 +1901,7 @@ class Handler(BaseHTTPRequestHandler):
                 accounts_text=str(body.get("accounts", ""))
                 workers=int(body.get("workers", 2))
                 gap=float(body.get("gap", 3.0))
+                required_level=int(body.get("required_level", 12))
             except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
             if not 1 <= workers <= 9999999999999:
@@ -1859,6 +1921,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.server.batch_started_at = time.monotonic()
                 self.server.batch_elapsed_ms = 0
                 self.server.batch_running = True
+                self.server.batch_required_level = required_level
             threading.Thread(
                 target=_batch_worker,
                 args=(self.server, credentials, workers, gap),
@@ -1872,6 +1935,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
             self.server.batch_stopped.set()
             self.send_json(HTTPStatus.OK, {"ok": True});return
+
+        if self.path.startswith("/api/history/"):
+            if not self.authorized():self.deny_access();return
+            if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:
+                self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
+            parts = self.path.strip("/").split("/")
+            if len(parts) == 3 and parts[2].isdigit():
+                db.delete_run(int(parts[2]))
+                self.send_json(HTTPStatus.OK, {"ok": True});return
+            if self.path == "/api/history/all" and self.headers.get("Content-Length", "0") != "0":
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+                if body.get("confirm") == True:
+                    db.delete_all_runs()
+                    self.send_json(HTTPStatus.OK, {"ok": True});return
+            self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Yêu cầu không hợp lệ"});return
 
         if self.path == "/api/batch/split":
             if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:

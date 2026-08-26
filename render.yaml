@@ -11,3 +11,7 @@ services:
         value: 3.13.4
       - key: API_TEST_PASSWORD
         sync: false
+      - key: TURSO_URL
+        sync: false
+      - key: TURSO_TOKEN
+        sync: false
