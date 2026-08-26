@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.cookiejar import Cookie, CookieJar
-from http.server import BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
@@ -1807,6 +1807,18 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *args: Any) -> None:
         return
 
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def authorized(self) -> bool:
         expected = os.environ.get("API_TEST_PASSWORD", "")
         if not expected:
@@ -1842,9 +1854,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline';connect-src 'self';frame-ancestors 'none';form-action 'self'")
 
     def send_json(self, status: HTTPStatus, value: dict[str, Any]) -> None:
-        body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        self.send_response(status);self.security_headers("application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)));self.end_headers();self.wfile.write(body)
+        try:
+            body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            self.send_response(status);self.security_headers("application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)));self.end_headers();self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
     def do_GET(self) -> None:
         if self.path in ("/", "/api/batch/state") and not self.authorized():
