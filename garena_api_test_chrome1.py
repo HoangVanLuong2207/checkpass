@@ -1120,7 +1120,7 @@ def format_user_output(result: dict[str, Any]) -> str:
                 )
             )
     else:
-        fields.append(("Kiện Tướng", "Không lấy được thông tin", "Không lấy được thông tin"))
+        fields.append(("Kiện Tướng", "Chưa tạo nhân vật", "Chưa tạo nhân vật"))
 
     return " || ".join(
         f"{label}: {clean(value, fallback)}" for label, value, fallback in fields
@@ -1633,10 +1633,13 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <div class="row">
 <div><label>Số luồng</label><input id="batchWorkers" type="number" min="1" max="99999999" value="2"></div>
 <div><label>Gap giữa 2 lần đăng nhập (giây, 0–60)</label><input id="batchGap" type="number" min="0" max="60" step="0.5" value="3"></div>
+<div><label>Cấp độ yêu cầu</label><input id="requiredLevel" type="number" min="0" max="99" value="12"></div>
 </div>
 <button id="batchStart" type="button">Chạy batch</button>
 <button id="batchStop" type="button" class="warnb">Dừng</button>
 <button id="batchExport" type="button" class="ghost">Xuất CSV</button>
+<button id="splitBtn" type="button" class="ghost" disabled>Chia lọc theo cấp độ</button>
+<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 2 tab</button>
 <label class="btnfile">Nhập file<input id="batchImport" type="file" accept=".txt,.csv,text/plain" hidden></label>
 <div id="batchFileName" class="fileinfo">Chưa chọn file.</div>
 <div id="batchStatus">Chưa chạy.</div>
@@ -1644,6 +1647,22 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Lỗi</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
 <small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Nếu sau ~25 giây (hoặc 5 lần thử) chưa đọc được chút dữ liệu nào sẽ báo "nghi sai pass hoặc tài khoản có vấn đề, xin tự kiểm tra"; đã đọc được dữ liệu một phần mà thiếu nhóm (hồ sơ tài khoản, session key, Kiện Tướng) thì thử lại đến khi đủ mới tính xong. SĐT, đăng nhập LQ gần nhất và IP đăng nhập nếu không có sẽ bỏ qua. Web API trả lời rõ là sai mật khẩu/khóa acc thì dừng thử ngay. Bấm "Dừng" để kết thúc sớm. "Xuất CSV" tải file gồm đủ các cột trên; khi nhập file, chỉ tên file được hiển thị và danh sách không được đưa vào ô bên trên.</small>
+
+<div id="splitSection" style="display:none;margin-top:18px">
+<h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
+<div style="display:flex;gap:18px;flex-wrap:wrap">
+<div style="flex:1;min-width:300px">
+<h3 style="color:#56d364;margin:0 0 8px;font-size:14px">✅ Đạt yêu cầu (<span id="metCount">0</span> acc)</h3>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th><th>Lỗi</th></tr></thead>
+<tbody id="metBody"></tbody></table></div>
+</div>
+<div style="flex:1;min-width:300px">
+<h3 style="color:#ff7b72;margin:0 0 8px;font-size:14px">❌ Không đạt (<span id="notMetCount">0</span> acc)</h3>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th><th>Lỗi</th></tr></thead>
+<tbody id="notMetBody"></tbody></table></div>
+</div>
+</div>
+</div>
 </div>
 
 <div class="card">
@@ -1666,7 +1685,31 @@ function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.classNam
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
 function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.email,r.email_status,r.mobile,r.two_step,r.authenticator,r.session_key,r.name,r.level,r.player_status,r.deletion_status,r.elapsed_ms,r.error,r.latest_login,r.login_ip].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
-async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running&&pollTimer){clearInterval(pollTimer);pollTimer=null;$('batchStart').disabled=false;}}catch(e){}}
+async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
+function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.name,r.level,r.player_status,r.session_key,r.error].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
+$('splitBtn').addEventListener('click',async()=>{
+ if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
+ const lv=parseInt($('requiredLevel').value,10)||12;
+ const res=await postJson('/api/batch/split',{required_level:lv});
+ if(!res.ok){setStatus(res.error||'Lỗi chia lọc',true);return;}
+ $('splitSection').style.display='block';
+ $('splitTitle').textContent='Chia lọc theo cấp độ >= '+lv;
+ $('metCount').textContent=res.met.length;
+ $('notMetCount').textContent=res.not_met.length;
+ renderSplitTable('metBody',res.met);
+ renderSplitTable('notMetBody',res.not_met);
+ setStatus('Đã chia lọc: '+res.met.length+' đạt, '+res.not_met.length+' không đạt',false);
+});
+$('exportXlsxBtn').addEventListener('click',async()=>{
+ if(!lastRows.length){setStatus('Chưa có kết quả batch để xuất',true);return;}
+ const lv=parseInt($('requiredLevel').value,10)||12;
+ setStatus('Đang tạo file XLSX...',false);
+ try{
+  const res=await fetch('/api/batch/export-xlsx',{method:'POST',cache:'no-store',credentials:'same-origin',headers:{'Content-Type':'application/json','X-API-Test-Token':token},body:JSON.stringify({required_level:lv})});
+  if(!res.ok){const j=await res.json().catch(()=>({}));setStatus(j.error||'Lỗi xuất XLSX',true);return;}
+  const blob=await res.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='ketqua_cap_do.xlsx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);setStatus('Đã tải file XLSX',false);
+ }catch(e){setStatus('Lỗi xuất: '+e,true);}
+});
 $('batchStart').addEventListener('click',async()=>{
  const accounts=batchFileText||$('batchAccounts').value;
  const res=await postJson('/api/batch/start',{accounts,workers:parseInt($('batchWorkers').value,10)||2,gap:parseFloat($('batchGap').value)||0});
@@ -1687,7 +1730,7 @@ $('f').addEventListener('submit',async ev=>{ev.preventDefault();const b=$('b'),o
  const data=await postJson('/api/test',{credential:input.value});
  out.className=data.ok?'ok':'bad';out.textContent=data.display||data.error||'Không có kết quả';
  input.value='';b.disabled=false;});
-(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
+(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(!s.running){$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
 </script></body></html>'''
 
 
@@ -1829,6 +1872,83 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
             self.server.batch_stopped.set()
             self.send_json(HTTPStatus.OK, {"ok": True});return
+
+        if self.path == "/api/batch/split":
+            if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:
+                self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
+            try:length=int(self.headers.get("Content-Length", "0"))
+            except ValueError:length=0
+            if length<=0 or length>MAX_BODY:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
+            try:
+                body=json.loads(self.rfile.read(length).decode("utf-8"))
+                required_level=int(body.get("required_level",12))
+            except (UnicodeDecodeError,json.JSONDecodeError,TypeError,ValueError):
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
+            with self.server.batch_lock:
+                rows=[dict(r) for r in self.server.batch_rows]
+            met,not_met=[],[]
+            for r in rows:
+                lv=r.get("level","").strip()
+                if lv.isdigit() and int(lv)>=required_level:
+                    met.append(r)
+                else:
+                    not_met.append(r)
+            self.send_json(HTTPStatus.OK,{"ok":True,"met":met,"not_met":not_met,"required_level":required_level});return
+
+        if self.path == "/api/batch/export-xlsx":
+            if self.headers.get("X-API-Test-Token", "") != self.server.csrf_token:
+                self.send_json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "CSRF token không hợp lệ"});return
+            try:length=int(self.headers.get("Content-Length", "0"))
+            except ValueError:length=0
+            if length<=0 or length>MAX_BODY:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
+            try:
+                body=json.loads(self.rfile.read(length).decode("utf-8"))
+                required_level=int(body.get("required_level",12))
+            except (UnicodeDecodeError,json.JSONDecodeError,TypeError,ValueError):
+                self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON không hợp lệ"});return
+            with self.server.batch_lock:
+                rows=[dict(r) for r in self.server.batch_rows]
+            met,not_met=[],[]
+            for r in rows:
+                lv=r.get("level","").strip()
+                if lv.isdigit() and int(lv)>=required_level:
+                    met.append(r)
+                else:
+                    not_met.append(r)
+            try:
+                import openpyxl
+                from openpyxl.styles import Font,PatternFill,Alignment
+                wb=openpyxl.Workbook()
+                header_font=Font(bold=True,color="FFFFFF")
+                header_fill=PatternFill(start_color="238636",end_color="238636",fill_type="solid")
+                not_met_fill=PatternFill(start_color="9e6a03",end_color="9e6a03",fill_type="solid")
+                col_names=["stt","account","status","uid","email","email_status","mobile","two_step","authenticator","session_key","name","level","player_status","deletion_status","elapsed_ms","error","latest_login","login_ip"]
+                col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Email","Xác thực email","SĐT","2FA","Authenticator","Session Key","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms","Lỗi","Đăng nhập LQ gần nhất","IP đăng nhập"]
+                for idx,data_list,label,fill in [(0,met,"Đạt",header_fill),(1,not_met,"Không đạt",not_met_fill)]:
+                    ws=wb.active if idx==0 else wb.create_sheet()
+                    ws.title=label
+                    for c,col_label in enumerate(col_labels,1):
+                        cell=ws.cell(row=1,column=c,value=col_label)
+                        cell.font=header_font;cell.fill=fill;cell.alignment=Alignment(horizontal="center")
+                    for ri,row in enumerate(data_list,2):
+                        for ci,col_name in enumerate(col_names,1):
+                            ws.cell(row=ri,column=ci,value=row.get(col_name,""))
+                    for c in range(1,len(col_labels)+1):
+                        ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width=max(12,len(col_labels[c-1])+2)
+                import io
+                buf=io.BytesIO();wb.save(buf);buf.seek(0)
+                xlsx_bytes=buf.read()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.send_header("Content-Disposition","attachment; filename=ketqua_cap_do.xlsx")
+                self.send_header("Content-Length",str(len(xlsx_bytes)))
+                self.security_headers("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                self.end_headers();self.wfile.write(xlsx_bytes)
+            except Exception as exc:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR,{"ok":False,"error":(str(exc).strip() or type(exc).__name__)[:500]})
+            return
 
         if self.path != "/api/test":
             self.send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Endpoint không tồn tại"});return
