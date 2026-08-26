@@ -1539,7 +1539,7 @@ def run_batch_core(
 
 
 def _batch_worker(
-    server: ApiTestServer,
+    server: Any,
     credentials: list[BatchAccount],
     workers: int,
     gap: float,
