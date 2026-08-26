@@ -879,15 +879,14 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
         }
 def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) -> dict[str, Any]:
     started = time.monotonic()
-    hard_timeout = BATCH_ROW_DEADLINE_SECONDS
     results: dict[str, Any] = {
         "tcp": {"ok": False, "account": account},
         "apis": {},
         "web_auth": {},
     }
 
-    def _do_check() -> None:
-        nonlocal results
+    sso: Any = None
+    try:
         client_type = resilient_tcp_client_type(tcp_module)
         with client_type(timeout=timeout) as client:
             uid = int(client.login(account, password))
@@ -903,64 +902,70 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "web_sso_key": str(sso.sso_key),
             "ignored_server_commands": [f"0x{item:X}" for item in ignored_commands],
         }
-        results["tcp_to_web_probe"] = legacy_account_sso_probe(
-            str(sso.sso_key), int(sso.expiry_time), timeout
-        )
-
-    try:
-        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="tcp-check") as pool:
-            future = pool.submit(_do_check)
-            future.result(timeout=hard_timeout)
     except Exception as exc:
-        if "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower():
-            results["tcp"]["error"] = f"timeout sau {hard_timeout:.0f}s"
-        else:
-            results["tcp"]["error"] = (str(exc).strip() or type(exc).__name__)[:500]
+        results["tcp"]["error"] = (str(exc).strip() or type(exc).__name__)[:500]
 
-    probe = results.get("tcp_to_web_probe") or {}
-    probe_account_init = probe.get("account_init") or {}
-    oauth_chain = probe.get("account_to_kientuong_oauth") or {}
-    probe_player_api = (
-        oauth_chain.get("player_api")
-        if isinstance(oauth_chain.get("player_api"), dict)
-        else {}
-    )
-
-    if probe_account_init.get("ok"):
-        account_auth = {
-            "ok": True,
-            "stage": "tcp_sso_primary",
-            "status": probe_account_init.get("status", 0),
+    tcp_ok = bool(results["tcp"].get("ok"))
+    account_init: dict[str, Any] = {}
+    player_api: dict[str, Any] = {}
+    if tcp_ok:
+        try:
+            probe = legacy_account_sso_probe(str(sso.sso_key), int(sso.expiry_time), timeout)
+        except Exception as exc:
+            probe = {
+                "ok": False,
+                "accepted": False,
+                "error": (str(exc).strip() or type(exc).__name__)[:500],
+            }
+        results["tcp_to_web_probe"] = probe
+        candidate = probe.get("account_init")
+        account_init = candidate if isinstance(candidate, dict) else {}
+        results["apis"]["account_init"] = account_init or {
+            "ok": False,
+            "status": probe.get("status", 0),
+            "error": str(probe.get("error") or "sso_key_probe_rejected"),
+        }
+        oauth_chain = probe.get("account_to_kientuong_oauth")
+        oauth_chain = oauth_chain if isinstance(oauth_chain, dict) else {}
+        candidate = oauth_chain.get("player_api")
+        player_api = candidate if isinstance(candidate, dict) else {}
+        results["apis"]["kientuong_player"] = player_api or {
+            "ok": False,
+            "error": str(oauth_chain.get("error") or "kientuong_probe_failed"),
+        }
+        results["web_auth"]["account_center"] = {
+            "ok": bool(account_init.get("ok")),
+            "stage": "tcp_sso_probe",
+            "error": None if account_init.get("ok") else str(probe.get("error") or "sso_key_probe_rejected"),
             "session_key": "",
-            "account_init": probe_account_init,
             "latest_lien_quan_login": probe.get("latest_lien_quan_login") or {},
         }
-    else:
+        results["web_auth"]["kientuong"] = {
+            "ok": bool(player_api.get("ok")),
+            "stage": "tcp_sso_probe_oauth",
+            "error": None if player_api.get("ok") else str(oauth_chain.get("error") or "kientuong_probe_failed"),
+        }
+
+    account_ok = bool(account_init.get("ok"))
+    kientuong_ok = bool(player_api.get("ok"))
+    if not tcp_ok or not account_ok or not kientuong_ok:
         account_session = WebSession(timeout)
         try:
             account_auth = web_account_center_login(account_session, account, password)
         except Exception as exc:
             account_auth = {
                 "ok": False,
-                "stage": "account_sso_fallback",
+                "stage": "account_sso",
                 "error": (str(exc).strip() or type(exc).__name__)[:500],
             }
-    results["web_auth"]["account_center"] = account_auth
-    results["apis"]["account_init"] = account_auth.get("account_init") or {
-        "ok": False,
-        "status": account_auth.get("status", 0),
-        "error": account_auth.get("error") or "account_sso_fallback_failed",
-    }
+        results["web_auth"]["account_center"] = account_auth
+        if not account_ok:
+            results["apis"]["account_init"] = account_auth.get("account_init") or {
+                "ok": False,
+                "status": account_auth.get("status", 0),
+                "error": account_auth.get("error") or "account_sso_login_failed",
+            }
 
-    if probe_player_api.get("ok"):
-        kientuong_auth = {
-            "ok": True,
-            "stage": "tcp_sso_primary",
-            "status": oauth_chain.get("status", 0),
-            "account_session_reused": True,
-        }
-        kientuong_player = probe_player_api
-    else:
         session = WebSession(timeout)
         kientuong_params = {
             "client_id": "100054",
@@ -976,16 +981,17 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         except Exception as exc:
             kientuong_auth = {
                 "ok": False,
-                "stage": "kientuong_oauth_fallback",
+                "stage": "kientuong_oauth",
                 "error": (str(exc).strip() or type(exc).__name__)[:500],
             }
         kientuong_auth.pop("_callback_values", None)
-        kientuong_player = session.api_result(
+        results["web_auth"]["kientuong"] = kientuong_auth
+        web_player = session.api_result(
             "https://kientuong.lienquan.garena.vn/api/player/get",
             headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
         )
-    results["web_auth"]["kientuong"] = kientuong_auth
-    results["apis"]["kientuong_player"] = kientuong_player
+        if not kientuong_ok:
+            results["apis"]["kientuong_player"] = web_player
 
     password = ""
     results["elapsed_ms"] = round((time.monotonic() - started) * 1000)
