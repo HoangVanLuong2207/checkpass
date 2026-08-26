@@ -1880,7 +1880,7 @@ def main() -> int:
         if not 1<=args.workers<=8:raise SystemExit("--workers phải trong khoảng 1..8")
         if not 0<=args.start_gap<=60:raise SystemExit("--start-gap phải trong khoảng 0..60 giây")
         return run_batch(args)
-    host=os.environ.get("HOST","127.0.0.1").strip() or "127.0.0.1"
+    host=os.environ.get("HOST","0.0.0.0" if os.environ.get("RENDER") else "127.0.0.1").strip() or "127.0.0.1"
     try:port=int(os.environ.get("PORT",str(args.port)))
     except ValueError:port=args.port
     if not 1024<=port<=65535:raise SystemExit("Port phải trong khoảng 1024..65535")
