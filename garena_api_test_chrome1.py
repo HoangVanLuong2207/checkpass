@@ -1865,7 +1865,7 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần, nếu vẫn không có cấp độ thì cột Cấp độ ghi <code>Ctnv</code>. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có ba tab Đạt, Không đạt và Đặc biệt; cột Tài khoản trong cả ba tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần, nếu vẫn không có cấp độ thì cột Cấp độ ghi <code>Ctnv</code>. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có bốn tab Đạt, Không đạt, Đặc biệt và FAIL; cột Tài khoản trong cả bốn tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -2222,8 +2222,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 with self.server.batch_lock:
                     rows=[dict(r) for r in self.server.batch_rows]
-            met,not_met=[],[]
+            met,not_met,special,failed=[],[],[],[]
             for r in rows:
+                if str(r.get("status") or "").upper() == "FAIL":
+                    failed.append(r)
+                    continue
+                # Special accounts have neither Garena Account Center nor
+                # Kien Tuong data. Keep them exclusively in their own sheet
+                # instead of also classifying their empty level as not met.
+                if str(r.get("_special") or "") == "1":
+                    special.append(r)
+                    continue
                 lv=r.get("level","").strip()
                 if lv.isdigit() and int(lv)>=required_level:
                     met.append(r)
@@ -2237,19 +2246,14 @@ class Handler(BaseHTTPRequestHandler):
                 header_fill=PatternFill(start_color="238636",end_color="238636",fill_type="solid")
                 not_met_fill=PatternFill(start_color="9e6a03",end_color="9e6a03",fill_type="solid")
                 special_fill=PatternFill(start_color="8250df",end_color="8250df",fill_type="solid")
+                failed_fill=PatternFill(start_color="da3633",end_color="da3633",fill_type="solid")
                 col_names=["stt","account","status","uid","email","email_status","mobile","two_step","authenticator","session_key","name","level","player_status","deletion_status","elapsed_ms","latest_login","login_ip"]
                 col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Email","Xác thực email","SĐT","2FA","Authenticator","Session Key","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms","Đăng nhập LQ gần nhất","IP đăng nhập"]
-                special=[]
-                for row in rows:
-                    credential=str(row.get("_credential") or "")
-                    if credential and str(row.get("_special") or "") == "1":
-                        special_row=public_batch_row(row)
-                        special_row["account"]=credential
-                        special.append(special_row)
                 sheets=[
                     (0,met,"Đạt",header_fill),
                     (1,not_met,"Không đạt",not_met_fill),
                     (2,special,"Đặc biệt",special_fill),
+                    (3,failed,"FAIL",failed_fill),
                 ]
                 for idx,data_list,label,fill in sheets:
                     ws=wb.active if idx==0 else wb.create_sheet()
