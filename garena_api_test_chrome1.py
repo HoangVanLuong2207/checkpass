@@ -162,6 +162,32 @@ def api_failure_text(result: Any, fallback: str) -> str:
     return fallback
 
 
+def kientuong_player_has_level(result: Any) -> bool:
+    """Only complete player data may stop the bounded Kien Tuong retries."""
+
+    if not isinstance(result, dict) or not result.get("ok"):
+        return False
+    body = result.get("body")
+    if not isinstance(body, dict):
+        return False
+    payload = body.get("data") if isinstance(body.get("data"), dict) else body
+    player = payload.get("player") if isinstance(payload, dict) else None
+    if not isinstance(player, dict) or not player:
+        return False
+    level = player.get("level")
+    return level is not None and str(level).strip() != ""
+
+
+def kientuong_no_character_response(result: Any) -> bool:
+    """The observed no-character response is HTTP 422 with an empty JSON body."""
+
+    return bool(
+        isinstance(result, dict)
+        and result.get("status") == 422
+        and result.get("body") == {}
+    )
+
+
 def fingerprint(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
@@ -900,10 +926,22 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
                         callback_status, final_url, _, _ = session.request(callback_url)
                         oauth_result["callback_status"] = callback_status
                         oauth_result["final_url"] = safe_url(final_url)
-                        oauth_result["player_api"] = session.api_result(
-                            "https://kientuong.lienquan.garena.vn/api/player/get",
-                            headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
-                        )
+                        player_api: dict[str, Any] = {}
+                        no_character_responses = 0
+                        for player_attempt in range(1, KIENTUONG_MAX_ATTEMPTS + 1):
+                            player_api = session.api_result(
+                                "https://kientuong.lienquan.garena.vn/api/player/get",
+                                headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
+                            )
+                            oauth_result["player_attempts"] = player_attempt
+                            if kientuong_no_character_response(player_api):
+                                no_character_responses += 1
+                            if kientuong_player_has_level(player_api):
+                                break
+                            if player_attempt < KIENTUONG_MAX_ATTEMPTS:
+                                time.sleep(0.75)
+                        oauth_result["player_api"] = player_api
+                        oauth_result["no_character_responses"] = no_character_responses
                         oauth_result["ok"] = bool(oauth_result["player_api"].get("ok"))
                     else:
                         oauth_result["error"] = "unexpected_callback_origin"
@@ -1022,7 +1060,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         }
 
     account_ok = bool(account_init.get("ok"))
-    kientuong_ok = bool(player_api.get("ok"))
+    kientuong_complete = kientuong_player_has_level(player_api)
     if not account_ok:
         account_timeout = min(timeout, 10.0)
         account_auth: dict[str, Any] = {}
@@ -1049,7 +1087,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "error": account_auth.get("error") or "account_sso_login_failed",
         }
 
-    if not kientuong_ok:
+    if not kientuong_complete:
         kientuong_timeout = 5.0
         kientuong_params = {
             "client_id": "100054",
@@ -1059,34 +1097,54 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "locale": "vi-VN",
         }
 
+        kientuong_session = WebSession(kientuong_timeout)
+        kientuong_oauth_ready = False
+        kientuong_auth: dict[str, Any] = results["web_auth"].get("kientuong") or {}
+
         def _do_kientuong() -> tuple[dict[str, Any], dict[str, Any]]:
-            session = WebSession(kientuong_timeout)
-            ka, _ = session.oauth_callback(
-                account, password, kientuong_params, ensure_login=False
-            )
-            ka.pop("_callback_values", None)
-            if not ka.get("ok"):
-                return ka, {
-                    "ok": False,
-                    "error": api_failure_text(ka, "kientuong_failed"),
-                }
-            wp = session.api_result(
+            nonlocal kientuong_auth, kientuong_oauth_ready
+            if not kientuong_oauth_ready:
+                kientuong_auth, _ = kientuong_session.oauth_callback(
+                    account, password, kientuong_params, ensure_login=False
+                )
+                kientuong_auth.pop("_callback_values", None)
+                if not kientuong_auth.get("ok"):
+                    return kientuong_auth, {
+                        "ok": False,
+                        "error": api_failure_text(kientuong_auth, "kientuong_failed"),
+                    }
+                kientuong_oauth_ready = True
+            wp = kientuong_session.api_result(
                 "https://kientuong.lienquan.garena.vn/api/player/get",
                 headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
             )
             if not wp.get("ok"):
                 wp["error"] = api_failure_text(wp, "kientuong_failed")
-            return ka, wp
+            return kientuong_auth, wp
 
-        # The SSO probe above already counts as one Kiện Tướng attempt when it
-        # reached the OAuth chain.  Across all paths, retry at most two times.
-        kientuong_attempts = 1 if oauth_chain else 0
-        kientuong_auth = results["web_auth"].get("kientuong") or {}
+        # Count player calls already made through the TCP SSO session so every
+        # path stays within one initial attempt plus two retries.
+        try:
+            kientuong_attempts = int(oauth_chain.get("player_attempts") or 0)
+        except (TypeError, ValueError):
+            kientuong_attempts = 0
+        kientuong_attempts = max(0, min(kientuong_attempts, KIENTUONG_MAX_ATTEMPTS))
+        try:
+            no_character_responses = int(oauth_chain.get("no_character_responses") or 0)
+        except (TypeError, ValueError):
+            no_character_responses = 0
         web_player = player_api or {"ok": False, "error": "kientuong_failed"}
-        while kientuong_attempts < KIENTUONG_MAX_ATTEMPTS and not web_player.get("ok"):
+        while (
+            kientuong_attempts < KIENTUONG_MAX_ATTEMPTS
+            and not kientuong_player_has_level(web_player)
+        ):
+            if kientuong_attempts:
+                time.sleep(0.75)
             kientuong_attempts += 1
             try:
                 kientuong_auth, web_player = _do_kientuong()
+                if kientuong_no_character_response(web_player):
+                    no_character_responses += 1
             except Exception as exc:
                 timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
                 error = "timeout 5s" if timed_out else (
@@ -1102,7 +1160,12 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         kientuong_auth["attempts"] = kientuong_attempts
         kientuong_auth["max_retries"] = KIENTUONG_MAX_RETRIES
         kientuong_auth["retry_exhausted"] = bool(
-            not web_player.get("ok") and kientuong_attempts >= KIENTUONG_MAX_ATTEMPTS
+            not kientuong_player_has_level(web_player)
+            and kientuong_attempts >= KIENTUONG_MAX_ATTEMPTS
+        )
+        kientuong_auth["no_character_responses"] = no_character_responses
+        kientuong_auth["no_character_confirmed"] = bool(
+            kientuong_auth["retry_exhausted"] and no_character_responses >= 2
         )
         results["web_auth"]["kientuong"] = kientuong_auth
         results["apis"]["kientuong_player"] = web_player
@@ -1608,11 +1671,11 @@ def batch_check_one(
         row["session_key"] = mask_batch_session_key(session_key)
 
         kientuong_ok = bool(kientuong_api.get("ok") or probe_player.get("ok"))
-        if kientuong_ok and not player:
-            row["player_status"] = "Chưa tạo nhân vật"
         kientuong_auth = web_auth.get("kientuong") or {}
-        kientuong_retry_exhausted = bool(kientuong_auth.get("retry_exhausted"))
-        if not row["level"] and (kientuong_ok or kientuong_retry_exhausted):
+        no_character_confirmed = bool(kientuong_auth.get("no_character_confirmed"))
+        if no_character_confirmed and not player:
+            row["player_status"] = "Chưa tạo nhân vật"
+        if not row["level"] and no_character_confirmed:
             row["level"] = "Ctnv"
         errors: list[str] = []
         if not login_rejected and not kientuong_ok:
@@ -1857,15 +1920,15 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <button id="batchStart" type="button">Chạy batch</button>
 <button id="batchStop" type="button" class="warnb">Dừng</button>
 <button id="batchExport" type="button" class="ghost">Xuất CSV</button>
-<button id="splitBtn" type="button" class="ghost" disabled>Chia lọc theo cấp độ</button>
-<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 3 tab</button>
+<button id="splitBtn" type="button" class="ghost">Chia lọc theo cấp độ</button>
+<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 4 tab</button>
 <label class="btnfile">Nhập file<input id="batchImport" type="file" accept=".txt,.csv,text/plain" hidden></label>
 <div id="batchFileName" class="fileinfo">Chưa chọn file.</div>
 <div id="batchStatus">Chưa chạy.</div>
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần, nếu vẫn không có cấp độ thì cột Cấp độ ghi <code>Ctnv</code>. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có bốn tab Đạt, Không đạt, Đặc biệt và FAIL; cột Tài khoản trong cả bốn tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần và chỉ ghi <code>Ctnv</code> khi API xác nhận phản hồi chưa tạo nhân vật lặp lại. Timeout, giới hạn truy cập hoặc lỗi OAuth không bị coi là chưa tạo nhân vật. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có bốn tab Đạt, Không đạt, Đặc biệt và FAIL; cột Tài khoản trong cả bốn tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -1910,20 +1973,20 @@ function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.classNam
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
 function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.email,r.email_status,r.mobile,r.two_step,r.authenticator,r.session_key,r.name,r.level,r.player_status,r.deletion_status,r.elapsed_ms,r.latest_login,r.login_ip].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
-async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
+async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
 function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.name,r.level,r.player_status,r.session_key].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
-$('splitBtn').addEventListener('click',async()=>{
+$('splitBtn').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
  const lv=parseInt($('requiredLevel').value,10)||12;
- const res=await postJson('/api/batch/split',{required_level:lv});
- if(!res.ok){setStatus(res.error||'Lỗi chia lọc',true);return;}
+ const met=[],notMet=[];
+ lastRows.forEach(r=>{const level=String(r.level||'').trim();if(/^\d+$/.test(level)&&Number(level)>=lv)met.push(r);else notMet.push(r);});
  $('splitSection').style.display='block';
  $('splitTitle').textContent='Chia lọc theo cấp độ >= '+lv;
- $('metCount').textContent=res.met.length;
- $('notMetCount').textContent=res.not_met.length;
- renderSplitTable('metBody',res.met);
- renderSplitTable('notMetBody',res.not_met);
- setStatus('Đã chia lọc: '+res.met.length+' đạt, '+res.not_met.length+' không đạt',false);
+ $('metCount').textContent=met.length;
+ $('notMetCount').textContent=notMet.length;
+ renderSplitTable('metBody',met);
+ renderSplitTable('notMetBody',notMet);
+ setStatus('Đã chia lọc: '+met.length+' đạt, '+notMet.length+' không đạt',false);
 });
 $('exportXlsxBtn').addEventListener('click',async()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để xuất',true);return;}
@@ -1955,7 +2018,7 @@ $('f').addEventListener('submit',async ev=>{ev.preventDefault();const b=$('b'),o
  const data=await postJson('/api/test',{credential:input.value});
  out.className=data.ok?'ok':'bad';out.textContent=data.display||data.error||'Không có kết quả';
  input.value='';b.disabled=false;});
-(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(!s.running){$('splitBtn').disabled=false;$('exportXlsxBtn').disabled=false;}if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
+(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(!s.running)$('exportXlsxBtn').disabled=false;if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
 async function loadHistory(){
  try{
   const r=await fetch('/api/history',{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});
@@ -2352,6 +2415,17 @@ def main() -> int:
             raise SystemExit("SELF-TEST FAIL: Garena web password transform")
         if redact_tree({"code": "secret"})["code"] == "secret":
             raise SystemExit("SELF-TEST FAIL: OAuth code redaction")
+        if kientuong_player_has_level({"ok": True, "body": {"data": {}}}):
+            raise SystemExit("SELF-TEST FAIL: empty Kien Tuong data accepted")
+        if not kientuong_player_has_level({
+            "ok": True,
+            "body": {"data": {"player": {"level": 12}}},
+        }):
+            raise SystemExit("SELF-TEST FAIL: valid Kien Tuong level rejected")
+        if not kientuong_no_character_response({"ok": False, "status": 422, "body": {}}):
+            raise SystemExit("SELF-TEST FAIL: no-character response rejected")
+        if kientuong_no_character_response({"ok": False, "status": 429, "body": {}}):
+            raise SystemExit("SELF-TEST FAIL: rate limit treated as no character")
         print("SELF-TEST OK: TCP module và localhost handler đã nạp.");return 0
     csrf=secrets.token_urlsafe(32);server=ApiTestServer((host,port),Handler,tcp_module,csrf,args.timeout)
     display_host="127.0.0.1" if host in ("0.0.0.0","::","") else host
