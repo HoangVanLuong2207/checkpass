@@ -131,10 +131,22 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
 
 
 def tcp_login_was_rejected(error: Any) -> bool:
-    """Only an explicit Garena TCP rejection proves the credentials are wrong."""
+    """Only an explicit Garena TCP rejection at LOGIN step proves credentials are wrong.
+    
+    Rejection at LOGIN_PREPARE (0x100) is rate limiting, not wrong password.
+    Only rejection at LOGIN (0x101) with specific error codes means wrong credentials.
+    """
 
     if bool(getattr(error, "garena_rejected", False)):
-        return True
+        command = getattr(error, "garena_command", 0)
+        result_code = getattr(error, "garena_result", 0)
+        # Chỉ bước LOGIN (0x101) mới là sai pass thật
+        # LOGIN_PREPARE (0x100) reject = rate limit
+        # SSO_KEY_GET (0x1BA) reject = session issue
+        if command == 0x101:
+            return True
+        # Bước khác reject = rate limit / server issue, không phải sai pass
+        return False
     message = str(error or "").strip().casefold()
     ascii_message = "".join(
         char
@@ -142,7 +154,13 @@ def tcp_login_was_rejected(error: Any) -> bool:
         if not unicodedata.combining(char)
     )
     explicitly_rejected = "tu choi" in ascii_message or "rejected" in ascii_message
-    return "garena" in ascii_message and explicitly_rejected
+    # Chỉ coi là sai pass khi message rõ ràng là bước LOGIN bị reject
+    if "garena" in ascii_message and explicitly_rejected:
+        # Kiểm tra có phải bước LOGIN_PREPARE không
+        if "prepare" in ascii_message or "0x100" in ascii_message:
+            return False  # Rate limit, không phải sai pass
+        return True
+    return False
 
 
 def api_failure_text(result: Any, fallback: str) -> str:
