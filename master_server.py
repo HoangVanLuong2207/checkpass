@@ -491,11 +491,14 @@ class MasterHandler(BaseHTTPRequestHandler):
             )
             chunks = split_chunks(parsed, chunk_size)
             for idx, chunk in enumerate(chunks):
-                for acc in chunk:
-                    store._exec(
-                        "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
-                        (job_id, idx, f"{acc.account}|{acc.password}"),
-                    )
+                accounts_json = json.dumps(
+                    [f"{acc.account}|{acc.password}" for acc in chunk],
+                    ensure_ascii=False,
+                )
+                store._exec(
+                    "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+                    (job_id, idx, accounts_json),
+                )
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
@@ -539,17 +542,15 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self._check_finish_all_jobs(now)
                 self._json(HTTPStatus.OK, {"ok": True, "claim": None})
                 return
-            chunk_id, job_id, _ = row
+            chunk_id, job_id, account_data = row
             store._conn.execute(
                 "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=?",
                 (satellite_id, now, now + lease_minutes * 60, chunk_id),
             )
-            accounts = [
-                item[0]
-                for item in store._conn.execute(
-                    "SELECT account FROM chunks WHERE id=?", (chunk_id,)
-                )
-            ]
+            try:
+                accounts = json.loads(account_data)
+            except (json.JSONDecodeError, TypeError):
+                accounts = [account_data] if account_data else []
             store._conn.commit()
         self._json(HTTPStatus.OK, {"ok": True, "claim": {
             "chunk_id": chunk_id,
