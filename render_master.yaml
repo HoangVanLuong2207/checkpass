@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: garena-master
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements_master.txt
+    startCommand: python master_server.py
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.4
+      - key: MASTER_TOKEN
+        sync: false
