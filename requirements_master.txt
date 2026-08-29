@@ -1,2 +1,1 @@
-# Master server không cần thêm package nào
-# Python stdlib đủ dùng (http.server, sqlite3, json, etc.)
+libsql-client>=0.3.0

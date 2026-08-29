@@ -8,6 +8,7 @@ không chạy Garena check; dữ liệu nằm trong SQLite trên đĩa.
 """
 
 import argparse
+import asyncio
 import csv
 import io
 import json
@@ -70,7 +71,82 @@ def _now() -> float:
     return time.time()
 
 
-class Store:
+def _run_async(coro):
+    """Run async code from sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
+
+
+class TursoStore:
+    """Store using Turso/libSQL cloud database."""
+    def __init__(self, url: str, token: str) -> None:
+        self._url = url
+        self._token = token
+        self._lock = threading.RLock()
+        self._init_tables()
+
+    async def _aclient(self):
+        from libsql_client import create_client
+        return create_client(self._url, auth_token=self._token or None)
+
+    async def _aexec(self, sql: str, args: tuple = ()) -> Any:
+        client = await self._aclient()
+        try:
+            return await client.execute(sql, list(args))
+        finally:
+            await client.close()
+
+    async def _afetch(self, sql: str, args: tuple = ()) -> list:
+        client = await self._aclient()
+        try:
+            result = await client.execute(sql, list(args))
+            return result.rows if hasattr(result, "rows") else []
+        finally:
+            await client.close()
+
+    async def _abatch(self, statements: list) -> Any:
+        client = await self._aclient()
+        try:
+            return await client.batch(statements)
+        finally:
+            await client.close()
+
+    def _init_tables(self) -> None:
+        for sql in _SCHEMA.strip().split(";"):
+            sql = sql.strip()
+            if sql:
+                try:
+                    _run_async(self._aexec(sql))
+                except Exception:
+                    pass
+
+    def exec(self, sql: str, args: tuple = ()) -> int:
+        with self._lock:
+            result = _run_async(self._aexec(sql, args))
+            return result.last_insert_rowid if hasattr(result, "last_insert_rowid") else 0
+
+    def fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
+        with self._lock:
+            return _run_async(self._afetch(sql, args))
+
+    def fetchone(self, sql: str, args: tuple = ()) -> tuple | None:
+        rows = self.fetch(sql, args)
+        return rows[0] if rows else None
+
+    def batch(self, statements: list) -> Any:
+        with self._lock:
+            return _run_async(self._abatch(statements))
+
+
+class LocalStore:
+    """Store using local SQLite file."""
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
@@ -81,16 +157,28 @@ class Store:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
 
-    def _fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
-        with self._lock:
-            cur = self._conn.execute(sql, args)
-            return cur.fetchall()
-
-    def _exec(self, sql: str, args: tuple = ()) -> int:
+    def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
             cur = self._conn.execute(sql, args)
             self._conn.commit()
             return cur.lastrowid
+
+    def fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
+        with self._lock:
+            return self._conn.execute(sql, args).fetchall()
+
+    def fetchone(self, sql: str, args: tuple = ()) -> tuple | None:
+        with self._lock:
+            return self._conn.execute(sql, args).fetchone()
+
+    def batch(self, statements: list) -> Any:
+        with self._lock:
+            for stmt in statements:
+                if isinstance(stmt, dict):
+                    self._conn.execute(stmt["sql"], stmt.get("args", []))
+                else:
+                    self._conn.execute(stmt)
+            self._conn.commit()
 
 
 @dataclass
@@ -432,27 +520,26 @@ class MasterHandler(BaseHTTPRequestHandler):
 
     def _handle_jobs_list(self) -> None:
         store = self.server.store
-        with store._lock:
-            jobs_raw = store._conn.execute(
-                "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs ORDER BY id DESC LIMIT 50"
-            ).fetchall()
-            jobs = []
-            for row in jobs_raw:
-                job_id = row[0]
-                results = store._conn.execute(
-                    "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) "
-                    "FROM results WHERE job_id=?",
-                    (job_id,),
-                ).fetchone()
-                results_count = results[0] or 0
-                ok_count = results[1] or 0
-                jobs.append({
-                    "id": job_id,
-                    "total": row[2],
-                    "status": row[4],
-                    "ok": ok_count,
-                    "fail": results_count - ok_count,
-                })
+        jobs_raw = store.fetch(
+            "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs ORDER BY id DESC LIMIT 50"
+        )
+        jobs = []
+        for row in jobs_raw:
+            job_id = row[0]
+            results = store.fetchone(
+                "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) "
+                "FROM results WHERE job_id=?",
+                (job_id,),
+            )
+            results_count = (results[0] if results else 0) or 0
+            ok_count = (results[1] if results else 0) or 0
+            jobs.append({
+                "id": job_id,
+                "total": row[2],
+                "status": row[4],
+                "ok": ok_count,
+                "fail": results_count - ok_count,
+            })
         self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs})
 
     def _handle_create_job(self) -> None:
@@ -484,21 +571,23 @@ class MasterHandler(BaseHTTPRequestHandler):
         chunk_size = max(1, min(chunk_size, MAX_CHUNK_LIMIT))
 
         store = self.server.store
-        with store._lock:
-            job_id = store._exec(
-                "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
-                (_now(), len(parsed), chunk_size, "open"),
+        job_id = store.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
+            (_now(), len(parsed), chunk_size, "open"),
+        )
+        chunks = split_chunks(parsed, chunk_size)
+        stmts = []
+        for idx, chunk in enumerate(chunks):
+            accounts_json = json.dumps(
+                [f"{acc.account}|{acc.password}" for acc in chunk],
+                ensure_ascii=False,
             )
-            chunks = split_chunks(parsed, chunk_size)
-            for idx, chunk in enumerate(chunks):
-                accounts_json = json.dumps(
-                    [f"{acc.account}|{acc.password}" for acc in chunk],
-                    ensure_ascii=False,
-                )
-                store._exec(
-                    "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
-                    (job_id, idx, accounts_json),
-                )
+            stmts.append({
+                "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+                "args": [job_id, idx, accounts_json],
+            })
+        if stmts:
+            store.batch(stmts)
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
@@ -524,59 +613,38 @@ class MasterHandler(BaseHTTPRequestHandler):
         if not 1 <= lease_minutes <= 60 * 8:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "lease_minutes không hợp lệ"})
             return
-        # Số chunk muốn nhận cùng lúc (mặc định 1, tối đa 10)
-        try:
-            max_chunks = int(body.get("max_chunks", 1))
-        except (TypeError, ValueError):
-            max_chunks = 1
-        max_chunks = max(1, min(max_chunks, 10))
 
         store = self.server.store
         now = _now()
-        claims = []
-        with store._lock:
-            try:
-                store._conn.execute("BEGIN IMMEDIATE")
-                for _ in range(max_chunks):
-                    row = store._conn.execute(
-                        """
-                        SELECT id, job_id, account FROM chunks
-                        WHERE status='pending'
-                           OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
-                        ORDER BY job_id, idx
-                        LIMIT 1
-                        """,
-                        (now,),
-                    ).fetchone()
-                    if row is None:
-                        break
-                    chunk_id, job_id, account_data = row
-                    # Atomic: đổi status ngay trong transaction
-                    store._conn.execute(
-                        "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
-                        (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
-                    )
-                    try:
-                        accounts = json.loads(account_data)
-                    except (json.JSONDecodeError, TypeError):
-                        accounts = [account_data] if account_data else []
-                    claims.append({
-                        "chunk_id": chunk_id,
-                        "job_id": job_id,
-                        "lease_until": now + lease_minutes * 60,
-                        "accounts": accounts,
-                    })
-                store._conn.commit()
-            except Exception:
-                store._conn.rollback()
-                raise
-            if not claims:
-                self._check_finish_all_jobs(now)
-        # Tương thích ngược: nếu chỉ claim 1 thì trả claim đơn
-        if max_chunks == 1:
-            self._json(HTTPStatus.OK, {"ok": True, "claim": claims[0] if claims else None})
-        else:
-            self._json(HTTPStatus.OK, {"ok": True, "claims": claims, "count": len(claims)})
+        row = store.fetchone(
+            """
+            SELECT id, job_id, account FROM chunks
+            WHERE status='pending'
+               OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
+            ORDER BY job_id, idx
+            LIMIT 1
+            """,
+            (now,),
+        )
+        if row is None:
+            self._check_finish_all_jobs(now)
+            self._json(HTTPStatus.OK, {"ok": True, "claim": None})
+            return
+        chunk_id, job_id, account_data = row
+        store.exec(
+            "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+            (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+        )
+        try:
+            accounts = json.loads(account_data)
+        except (json.JSONDecodeError, TypeError):
+            accounts = [account_data] if account_data else []
+        self._json(HTTPStatus.OK, {"ok": True, "claim": {
+            "chunk_id": chunk_id,
+            "job_id": job_id,
+            "lease_until": now + lease_minutes * 60,
+            "accounts": accounts,
+        }})
 
     def _handle_report(self) -> None:
         try:
@@ -593,47 +661,37 @@ class MasterHandler(BaseHTTPRequestHandler):
         if not isinstance(rows, list):
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "cần mảng rows"})
             return
-        # done=true nghĩa là chunk đã check xong hoàn toàn
         is_done = bool(body.get("done", True))
 
         store = self.server.store
         now = _now()
-        with store._lock:
-            chunk = store._conn.execute(
-                "SELECT job_id, status FROM chunks WHERE id=?", (chunk_id,)
-            ).fetchone()
-            if chunk is None:
-                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "chunk không tồn tại"})
-                return
-            job_id = chunk[0]
-            try:
-                store._conn.execute("BEGIN IMMEDIATE")
-                for row in rows:
-                    if not isinstance(row, dict):
-                        continue
-                    account = str(row.get("account", "") or "")
-                    if not account:
-                        continue
-                    store._conn.execute(
-                        """
-                        INSERT INTO results (chunk_id, job_id, account, row_json, reported_at)
-                        VALUES (?,?,?,?,?)
-                        ON CONFLICT(chunk_id, account) DO UPDATE SET
-                            row_json=excluded.row_json, reported_at=excluded.reported_at
-                        """,
-                        (chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), now),
-                    )
-                if is_done:
-                    store._conn.execute(
-                        "UPDATE chunks SET status='done', reported_at=? WHERE id=?",
-                        (now, chunk_id),
-                    )
-                store._conn.commit()
-            except Exception:
-                store._conn.rollback()
-                raise
-            if is_done:
-                self._check_finish_all_jobs(now)
+        chunk = store.fetchone(
+            "SELECT job_id, status FROM chunks WHERE id=?", (chunk_id,)
+        )
+        if chunk is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "chunk không tồn tại"})
+            return
+        job_id = chunk[0]
+        stmts = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            account = str(row.get("account", "") or "")
+            if not account:
+                continue
+            stmts.append({
+                "sql": "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET row_json=excluded.row_json, reported_at=excluded.reported_at",
+                "args": [chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), now],
+            })
+        if is_done:
+            stmts.append({
+                "sql": "UPDATE chunks SET status='done', reported_at=? WHERE id=?",
+                "args": [now, chunk_id],
+            })
+        if stmts:
+            store.batch(stmts)
+        if is_done:
+            self._check_finish_all_jobs(now)
         self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done})
 
     def _handle_release(self) -> None:
@@ -649,59 +707,44 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         satellite_id = str(body.get("satellite_id") or "")
         store = self.server.store
-        with store._lock:
-            store._conn.execute(
-                """
-                UPDATE chunks SET status='pending', satellite_id='', claimed_at=NULL, lease_until=NULL
-                WHERE id=? AND status='claimed' AND (?='' OR satellite_id=?)
-                """,
-                (chunk_id, satellite_id, satellite_id),
-            )
-            store._conn.commit()
+        store.exec(
+            "UPDATE chunks SET status='pending', satellite_id='', claimed_at=NULL, lease_until=NULL WHERE id=? AND status='claimed' AND (?='' OR satellite_id=?)",
+            (chunk_id, satellite_id, satellite_id),
+        )
         self._json(HTTPStatus.OK, {"ok": True})
 
     def _check_finish_all_jobs(self, now: float) -> None:
         store = self.server.store
-        open_jobs = [
-            item[0]
-            for item in store._conn.execute("SELECT id FROM jobs WHERE status='open'")
-        ]
-        for job_id in open_jobs:
-            pending = store._conn.execute(
+        open_jobs = store.fetch("SELECT id FROM jobs WHERE status='open'")
+        for item in open_jobs:
+            job_id = item[0]
+            pending = store.fetchone(
                 "SELECT COUNT(*) FROM chunks WHERE job_id=? AND status!='done'", (job_id,)
-            ).fetchone()[0]
-            if pending == 0:
-                store._conn.execute(
+            )
+            if pending and pending[0] == 0:
+                store.exec(
                     "UPDATE jobs SET status='done', finished_at=? WHERE id=?",
                     (now, job_id),
                 )
 
     def _handle_job_summary(self, job_id: int) -> None:
         store = self.server.store
-        with store._lock:
-            job = store._conn.execute(
-                "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if job is None:
-                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
-                return
-            pending = store._conn.execute(
-                "SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='pending'", (job_id,)
-            ).fetchone()[0]
-            claimed = store._conn.execute(
-                "SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='claimed'", (job_id,)
-            ).fetchone()[0]
-            done = store._conn.execute(
-                "SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='done'", (job_id,)
-            ).fetchone()[0]
-            results = store._conn.execute(
-                "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) "
-                "FROM results WHERE job_id=?",
-                (job_id,),
-            ).fetchone()
-            results_count = results[0] or 0
-            ok_count = results[1] or 0
+        job = store.fetchone(
+            "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs WHERE id=?",
+            (job_id,),
+        )
+        if job is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        pending = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='pending'", (job_id,)) or [0])[0]
+        claimed = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='claimed'", (job_id,)) or [0])[0]
+        done = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='done'", (job_id,)) or [0])[0]
+        results = store.fetchone(
+            "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) FROM results WHERE job_id=?",
+            (job_id,),
+        )
+        results_count = (results[0] if results else 0) or 0
+        ok_count = (results[1] if results else 0) or 0
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
@@ -716,19 +759,17 @@ class MasterHandler(BaseHTTPRequestHandler):
 
     def _handle_job_rows(self, job_id: int) -> None:
         store = self.server.store
-        with store._lock:
-            rows_raw = store._conn.execute(
-                "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
-            ).fetchall()
+        rows_raw = store.fetch(
+            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+        )
         rows = [json.loads(item[0]) for item in rows_raw]
         self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "rows": rows})
 
     def _handle_job_export(self, job_id: int) -> None:
         store = self.server.store
-        with store._lock:
-            rows_raw = store._conn.execute(
-                "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
-            ).fetchall()
+        rows_raw = store.fetch(
+            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+        )
         rows = [json.loads(item[0]) for item in rows_raw]
         columns: list[str] = []
         for row in rows:
@@ -798,9 +839,18 @@ def main() -> int:
         assert len(dup) == 2
         print("SELF-TEST OK: master parse/split."); return 0
 
-    store = Store(db_path)
+    # Chọn store: Turso (cloud) hoặc SQLite local
+    turso_url = os.environ.get("TURSO_URL", "").strip()
+    turso_token = os.environ.get("TURSO_TOKEN", "").strip()
+    if turso_url:
+        store = TursoStore(turso_url, turso_token)
+        db_label = f"turso={turso_url.split('//')[1].split('.')[0] if '//' in turso_url else turso_url}"
+    else:
+        store = LocalStore(db_path)
+        db_label = f"sqlite={db_path}"
+
     server = CoordinatorServer((host, port), MasterHandler, store, token)
-    print(f"[master] Tổng bộ: http://{host}:{port}  role=coordinator  db={db_path}")
+    print(f"[master] Tổng bộ: http://{host}:{port}  role=coordinator  db={db_label}")
     if not token:
         print("[master] CẢNH BÁO: chưa đặt MASTER_TOKEN - các vệ tinh đều truy cập được. Hãy đặt trên Render.")
     try:
