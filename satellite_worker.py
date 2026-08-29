@@ -16,6 +16,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -35,6 +36,7 @@ WORKERS = int(_env("WORKERS", "8") or "8")
 START_GAP = float(_env("START_GAP", "3.0") or "3.0")
 TIMEOUT = float(_env("TIMEOUT", "20.0") or "20.0")
 LEASE_MINUTES = float(_env("LEASE_MINUTES", "60") or "60")
+CONCURRENT_CHUNKS = int(_env("CONCURRENT_CHUNKS", "3") or "3")
 POLL_INTERVAL = float(_env("POLL_INTERVAL", "15") or "15")
 HEALTH_PORT = int(_env("HEALTH_PORT", "8765") or "8765")
 HEALTH_HOST = _env("HEALTH_HOST", "0.0.0.0") or "0.0.0.0"
@@ -103,15 +105,11 @@ def _run_health_server() -> None:
         print(f"[satellite] lỗi health server: {exc}", flush=True)
 
 
-def _one_chunk(client: _Client, tcp_module: Any) -> None:
-    claim_resp = client.claim()
-    claim = claim_resp.get("claim")
-    if not claim:
-        time.sleep(POLL_INTERVAL)
-        return
+def _process_chunk(client: _Client, tcp_module: Any, claim: dict) -> None:
+    """Xử lý 1 chunk trong thread riêng."""
     chunk_id = int(claim["chunk_id"])
     accounts = list(claim.get("accounts") or [])
-    print(f"[satellite] {SATELLITE_ID}: claim chunk {chunk_id} ({len(accounts)} acc)", flush=True)
+    print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} ({len(accounts)} acc)", flush=True)
 
     credentials = []
     for index, raw in enumerate(accounts, 1):
@@ -129,7 +127,6 @@ def _one_chunk(client: _Client, tcp_module: Any) -> None:
             password = ""
         credentials.append(api_test.BatchAccount(index, account, password))
 
-    rows: list[dict[str, str]] = []
     try:
         raw_rows = api_test.run_batch_core(
             credentials, tcp_module, WORKERS, START_GAP, TIMEOUT
@@ -143,7 +140,7 @@ def _one_chunk(client: _Client, tcp_module: Any) -> None:
             flush=True,
         )
     except Exception as exc:
-        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} lỗi, release để check lại: {exc}", flush=True)
+        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} lỗi, release: {exc}", flush=True)
         try:
             client.release(chunk_id)
         except Exception as release_exc:
@@ -158,15 +155,44 @@ def _worker_loop() -> None:
     client = _Client(MASTER_URL, MASTER_TOKEN)
     print(
         f"[satellite] {SATELLITE_ID} khởi động: master={MASTER_URL} "
-        f"workers={WORKERS} gap={START_GAP:g}s timeout={TIMEOUT:g}s",
+        f"workers={WORKERS} concurrent_chunks={CONCURRENT_CHUNKS} "
+        f"gap={START_GAP:g}s timeout={TIMEOUT:g}s",
         flush=True,
     )
-    while True:
-        try:
-            _one_chunk(client, tcp_module)
-        except Exception as exc:
-            print(f"[satellite] lỗi vòng lặp: {exc}; chờ {POLL_INTERVAL}s", flush=True)
-            time.sleep(POLL_INTERVAL)
+
+    # Đếm số chunk đang xử lý
+    active_count = 0
+    active_lock = threading.Lock()
+
+    def on_chunk_done(future):
+        nonlocal active_count
+        with active_lock:
+            active_count -= 1
+
+    with ThreadPoolExecutor(max_workers=CONCURRENT_CHUNKS, thread_name_prefix="chunk") as pool:
+        while True:
+            try:
+                # Chờ nếu đủ chunk đang chạy
+                with active_lock:
+                    if active_count >= CONCURRENT_CHUNKS:
+                        time.sleep(1)
+                        continue
+
+                claim_resp = client.claim()
+                claim = claim_resp.get("claim")
+                if not claim:
+                    time.sleep(POLL_INTERVAL)
+                    continue
+
+                with active_lock:
+                    active_count += 1
+
+                future = pool.submit(_process_chunk, client, tcp_module, claim)
+                future.add_done_callback(on_chunk_done)
+
+            except Exception as exc:
+                print(f"[satellite] lỗi vòng lặp: {exc}; chờ {POLL_INTERVAL}s", flush=True)
+                time.sleep(POLL_INTERVAL)
 
 
 def main() -> int:

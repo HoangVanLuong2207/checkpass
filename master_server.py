@@ -524,40 +524,59 @@ class MasterHandler(BaseHTTPRequestHandler):
         if not 1 <= lease_minutes <= 60 * 8:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "lease_minutes không hợp lệ"})
             return
+        # Số chunk muốn nhận cùng lúc (mặc định 1, tối đa 10)
+        try:
+            max_chunks = int(body.get("max_chunks", 1))
+        except (TypeError, ValueError):
+            max_chunks = 1
+        max_chunks = max(1, min(max_chunks, 10))
 
         store = self.server.store
         now = _now()
+        claims = []
         with store._lock:
-            row = store._conn.execute(
-                """
-                SELECT id, job_id, account FROM chunks
-                WHERE status='pending'
-                   OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
-                ORDER BY job_id, idx
-                LIMIT 1
-                """,
-                (now,),
-            ).fetchone()
-            if row is None:
-                self._check_finish_all_jobs(now)
-                self._json(HTTPStatus.OK, {"ok": True, "claim": None})
-                return
-            chunk_id, job_id, account_data = row
-            store._conn.execute(
-                "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=?",
-                (satellite_id, now, now + lease_minutes * 60, chunk_id),
-            )
             try:
-                accounts = json.loads(account_data)
-            except (json.JSONDecodeError, TypeError):
-                accounts = [account_data] if account_data else []
-            store._conn.commit()
-        self._json(HTTPStatus.OK, {"ok": True, "claim": {
-            "chunk_id": chunk_id,
-            "job_id": job_id,
-            "lease_until": now + lease_minutes * 60,
-            "accounts": accounts,
-        }})
+                store._conn.execute("BEGIN IMMEDIATE")
+                for _ in range(max_chunks):
+                    row = store._conn.execute(
+                        """
+                        SELECT id, job_id, account FROM chunks
+                        WHERE status='pending'
+                           OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
+                        ORDER BY job_id, idx
+                        LIMIT 1
+                        """,
+                        (now,),
+                    ).fetchone()
+                    if row is None:
+                        break
+                    chunk_id, job_id, account_data = row
+                    # Atomic: đổi status ngay trong transaction
+                    store._conn.execute(
+                        "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+                        (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+                    )
+                    try:
+                        accounts = json.loads(account_data)
+                    except (json.JSONDecodeError, TypeError):
+                        accounts = [account_data] if account_data else []
+                    claims.append({
+                        "chunk_id": chunk_id,
+                        "job_id": job_id,
+                        "lease_until": now + lease_minutes * 60,
+                        "accounts": accounts,
+                    })
+                store._conn.commit()
+            except Exception:
+                store._conn.rollback()
+                raise
+            if not claims:
+                self._check_finish_all_jobs(now)
+        # Tương thích ngược: nếu chỉ claim 1 thì trả claim đơn
+        if max_chunks == 1:
+            self._json(HTTPStatus.OK, {"ok": True, "claim": claims[0] if claims else None})
+        else:
+            self._json(HTTPStatus.OK, {"ok": True, "claims": claims, "count": len(claims)})
 
     def _handle_report(self) -> None:
         try:
