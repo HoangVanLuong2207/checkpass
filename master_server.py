@@ -593,6 +593,8 @@ class MasterHandler(BaseHTTPRequestHandler):
         if not isinstance(rows, list):
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "cần mảng rows"})
             return
+        # done=true nghĩa là chunk đã check xong hoàn toàn
+        is_done = bool(body.get("done", True))
 
         store = self.server.store
         now = _now()
@@ -621,16 +623,18 @@ class MasterHandler(BaseHTTPRequestHandler):
                         """,
                         (chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), now),
                     )
-                store._conn.execute(
-                    "UPDATE chunks SET status='done', reported_at=? WHERE id=?",
-                    (now, chunk_id),
-                )
+                if is_done:
+                    store._conn.execute(
+                        "UPDATE chunks SET status='done', reported_at=? WHERE id=?",
+                        (now, chunk_id),
+                    )
                 store._conn.commit()
             except Exception:
                 store._conn.rollback()
                 raise
-            self._check_finish_all_jobs(now)
-        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows)})
+            if is_done:
+                self._check_finish_all_jobs(now)
+        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done})
 
     def _handle_release(self) -> None:
         try:

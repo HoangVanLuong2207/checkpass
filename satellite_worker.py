@@ -71,8 +71,8 @@ class _Client:
             "lease_minutes": LEASE_MINUTES,
         })
 
-    def report(self, chunk_id: int, rows: list[dict]) -> dict:
-        return self._request("/api/report", {"chunk_id": chunk_id, "rows": rows})
+    def report(self, chunk_id: int, rows: list[dict], done: bool = True) -> dict:
+        return self._request("/api/report", {"chunk_id": chunk_id, "rows": rows, "done": done})
 
     def release(self, chunk_id: int) -> dict:
         return self._request("/api/chunk/release", {
@@ -128,17 +128,37 @@ def _process_chunk(client: _Client, tcp_module: Any, claim: dict) -> None:
         credentials.append(api_test.BatchAccount(index, account, password))
 
     try:
-        raw_rows = api_test.run_batch_core(
-            credentials, tcp_module, WORKERS, START_GAP, TIMEOUT
+        buffer = []
+        buffer_lock = threading.Lock()
+        sent_count = [0]
+        FLUSH_SIZE = 5
+
+        def on_result(row):
+            pub = api_test.public_batch_row(row)
+            flush = []
+            with buffer_lock:
+                buffer.append(pub)
+                if len(buffer) >= FLUSH_SIZE:
+                    flush = list(buffer)
+                    buffer.clear()
+            if flush:
+                try:
+                    client.report(chunk_id, flush, done=False)
+                    sent_count[0] += len(flush)
+                except Exception as exc:
+                    print(f"[satellite] stream report lỗi: {exc}", flush=True)
+
+        api_test.run_batch_core(
+            credentials, tcp_module, WORKERS, START_GAP, TIMEOUT,
+            on_result=on_result,
         )
-        rows = [api_test.public_batch_row(row) for row in raw_rows]
-        client.report(chunk_id, rows)
-        ok = sum(1 for r in rows if r.get("status") == "OK")
-        print(
-            f"[satellite] {SATELLITE_ID}: chunk {chunk_id} xong "
-            f"{len(rows)} acc (ok={ok} fail={len(rows) - ok})",
-            flush=True,
-        )
+        # Gửi phần còn lại + đánh dấu done
+        with buffer_lock:
+            remaining = list(buffer)
+            buffer.clear()
+        client.report(chunk_id, remaining, done=True)
+        total = sent_count[0] + len(remaining)
+        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} xong {total} acc", flush=True)
     except Exception as exc:
         print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} lỗi, release: {exc}", flush=True)
         try:
