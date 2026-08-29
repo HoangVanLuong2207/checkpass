@@ -387,7 +387,7 @@ Chạy `CHAY_TEST_GARENA_APIS_CHROME.cmd` hoặc:
 python garena_api_test_chrome.py
 ```
 
-Chrome mở `http://127.0.0.1:8766/`. Nhập một dòng `user|pass`. Công cụ thực hiện TCP login, lấy SSO key trong bộ nhớ và thử tuần tự:
+Chrome mở `http://127.0.0.1:5555/`. Có thể mở thêm nhiều cổng dùng chung trạng thái bằng cách lặp tham số, ví dụ `--port 5555 --port 5556`. Nhập một dòng `user|pass`. Công cụ thực hiện TCP login, lấy SSO key trong bộ nhớ và thử tuần tự:
 
 - `account.garena.com/api/account/init`
 - OAuth Kiện Tướng và `api/player/get`

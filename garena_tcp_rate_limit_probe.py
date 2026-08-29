@@ -72,26 +72,28 @@ def load_credentials(path: Path, limit: int) -> list[Credential]:
     if not path.is_file():
         raise ValueError(f"Không tìm thấy file: {path}")
     credentials: list[Credential] = []
-    seen: set[str] = set()
     for line_number, raw_line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if "|" in line:
-            account, password = line.split("|", 1)
+            parts = line.split("|")
+            if len(parts) < 2:
+                raise ValueError(
+                    f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)"
+                )
+            account = parts[0].strip()
+            password = parts[1].strip()
         elif line.count(":") == 1:
             account, password = line.split(":", 1)
+            account = account.strip()
+            password = password.strip()
         else:
             raise ValueError(
-                f"Dòng {line_number}: cần định dạng user|pass hoặc user:pass"
+                f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)"
             )
-        account = account.strip()
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
-        identity = account.casefold()
-        if identity in seen:
-            raise ValueError(f"Dòng {line_number}: tài khoản bị trùng")
-        seen.add(identity)
         credentials.append(Credential(len(credentials) + 1, account, password))
         if len(credentials) >= limit:
             break
@@ -165,7 +167,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         nargs="?",
         default=DEFAULT_CREDENTIALS_FILE,
-        help="File UTF-8 dạng user|pass hoặc user:pass (mặc định: accounts_probe.txt cạnh chương trình)",
+        help="File UTF-8 dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass) (mặc định: accounts_probe.txt cạnh chương trình)",
     )
     parser.add_argument("--limit", type=int, default=5, help="Số tài khoản, 1..40 (mặc định 5)")
     parser.add_argument("--workers", type=int, choices=(20, 40), default=20)

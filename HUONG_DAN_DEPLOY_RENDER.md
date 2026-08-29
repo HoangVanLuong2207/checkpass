@@ -5,7 +5,7 @@
 1. **`garena_tcp.py`** đã được copy từ thư mục lồng ra **thư mục gốc** (SHA-256 khớp bản gốc) để repo deploy tự chứa đầy đủ.
 2. **`garena_tcp_login_chrome.py`**: tự tìm `garena_tcp.py` ở vị trí cũ (máy local) hoặc đặt cạnh file (trên Render) — vẫn kiểm tra SHA-256.
 3. **`garena_api_test_chrome1.py`**:
-   - Bind theo biến môi trường `PORT` / `HOST` của Render (mặc định local vẫn `127.0.0.1:8766`, không ảnh hưởng chạy tại máy).
+   - Bind theo biến môi trường `PORT` / `HOST` của Render (mặc định local là `127.0.0.1:5555`; có thể lặp `--port` để mở thêm cổng dùng chung trạng thái).
    - Tự tắt mở Chrome khi chạy trên cloud (env `RENDER`).
    - Hỗ trợ mật khẩu truy cập qua env `API_TEST_PASSWORD` (Basic Auth) — trang web và API đều được chặn nếu chưa nhập đúng.
 3. **`requirements.txt`** (chỉ cần `cryptography`), **`render.yaml`**, **`.gitignore`**.

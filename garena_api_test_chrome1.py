@@ -62,7 +62,7 @@ ACCOUNT_VISIBLE_PII = frozenset({"email", "email_v", "email_verified", "email_ve
 MAX_BATCH_BODY = 512 * 1024
 MAX_BATCH_ACCOUNTS = 10**18
 ACCOUNT_MAX_ATTEMPTS = 3
-KIENTUONG_MAX_RETRIES = 2
+KIENTUONG_MAX_RETRIES = 6
 KIENTUONG_MAX_ATTEMPTS = 1 + KIENTUONG_MAX_RETRIES
 
 
@@ -938,6 +938,8 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
                                 no_character_responses += 1
                             if kientuong_player_has_level(player_api):
                                 break
+                            if no_character_responses >= 2:
+                                break
                             if player_attempt < KIENTUONG_MAX_ATTEMPTS:
                                 time.sleep(0.75)
                         oauth_result["player_api"] = player_api
@@ -1059,33 +1061,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "error": None if player_api.get("ok") else str(oauth_chain.get("error") or "kientuong_probe_failed"),
         }
 
-    account_ok = bool(account_init.get("ok"))
     kientuong_complete = kientuong_player_has_level(player_api)
-    if not account_ok:
-        account_timeout = min(timeout, 10.0)
-        account_auth: dict[str, Any] = {}
-        for account_attempt in range(1, ACCOUNT_MAX_ATTEMPTS + 1):
-            account_session = WebSession(account_timeout)
-            try:
-                account_auth = web_account_center_login(account_session, account, password)
-            except Exception as exc:
-                timed_out = "Timeout" in type(exc).__name__ or "timed out" in str(exc).lower()
-                account_auth = {
-                    "ok": False,
-                    "stage": "account_sso",
-                    "error": f"timeout {account_timeout:.0f}s" if timed_out else (
-                        str(exc).strip() or type(exc).__name__
-                    )[:500],
-                }
-            account_auth["attempts"] = account_attempt
-            if account_auth.get("ok"):
-                break
-        results["web_auth"]["account_center"] = account_auth
-        results["apis"]["account_init"] = account_auth.get("account_init") or {
-            "ok": False,
-            "status": account_auth.get("status", 0),
-            "error": account_auth.get("error") or "account_sso_login_failed",
-        }
 
     if not kientuong_complete:
         kientuong_timeout = 5.0
@@ -1137,6 +1113,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
         while (
             kientuong_attempts < KIENTUONG_MAX_ATTEMPTS
             and not kientuong_player_has_level(web_player)
+            and no_character_responses < 2
         ):
             if kientuong_attempts:
                 time.sleep(0.75)
@@ -1164,9 +1141,7 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             and kientuong_attempts >= KIENTUONG_MAX_ATTEMPTS
         )
         kientuong_auth["no_character_responses"] = no_character_responses
-        kientuong_auth["no_character_confirmed"] = bool(
-            kientuong_auth["retry_exhausted"] and no_character_responses >= 2
-        )
+        kientuong_auth["no_character_confirmed"] = bool(no_character_responses >= 2)
         results["web_auth"]["kientuong"] = kientuong_auth
         results["apis"]["kientuong_player"] = web_player
 
@@ -1363,10 +1338,8 @@ def mask_batch_session_key(value: Any, visible: int = 8) -> str:
 
 
 BATCH_FIELDNAMES = [
-    "stt", "account", "status", "uid", "email", "email_status", "mobile",
-    "two_step", "authenticator", "session_key",
-    "name", "level", "player_status", "deletion_status", "elapsed_ms",
-    "latest_login", "login_ip",
+    "stt", "account", "status", "uid",
+    "name", "level", "player_status", "elapsed_ms",
 ]
 
 
@@ -1380,7 +1353,7 @@ REQUIRED_SESSION_LABEL = "session_key"
 REQUIRED_KIENTUONG_LABEL = "Kiện Tướng"
 
 MAX_EMPTY_ATTEMPTS = 5
-BATCH_ROW_DEADLINE_SECONDS = 25.0
+BATCH_ROW_DEADLINE_SECONDS = 60.0
 BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
@@ -1393,33 +1366,13 @@ def batch_login_rejected_permanently(result: Any) -> bool:
 
 
 def batch_required_missing(result: Any) -> list[str]:
-    """Data groups that must be read (retry until present) before accepting a row."""
+    """Chi can Kien Tuong - Ctnv hoac co level moi la du."""
 
     if not isinstance(result, dict):
-        return [REQUIRED_ACCOUNT_LABEL, REQUIRED_SESSION_LABEL, REQUIRED_KIENTUONG_LABEL]
+        return [REQUIRED_KIENTUONG_LABEL]
     apis = result.get("apis") or {}
-    web_auth = result.get("web_auth") or {}
-    tcp_info = result.get("tcp") or {}
     probe = result.get("tcp_to_web_probe") or {}
-
-    init_api = apis.get("account_init") or {}
-    init_body = init_api.get("body") if isinstance(init_api.get("body"), dict) else {}
-    probe_init = probe.get("account_init") or {}
-    probe_body = probe_init.get("body") if isinstance(probe_init.get("body"), dict) else {}
-    user_info = (
-        init_body.get("user_info") if isinstance(init_body.get("user_info"), dict) else None
-    )
-    if not user_info:
-        user_info = (
-            probe_body.get("user_info")
-            if isinstance(probe_body.get("user_info"), dict)
-            else None
-        )
-
-    account_auth = web_auth.get("account_center") or {}
-    session_key = str(account_auth.get("session_key") or "") or str(
-        tcp_info.get("web_sso_key") or ""
-    )
+    web_auth = result.get("web_auth") or {}
 
     oauth_chain = probe.get("account_to_kientuong_oauth") or {}
     kientuong_api = apis.get("kientuong_player") or {}
@@ -1429,36 +1382,41 @@ def batch_required_missing(result: Any) -> list[str]:
         else {}
     )
 
-    missing: list[str] = []
-    if not user_info:
-        missing.append(REQUIRED_ACCOUNT_LABEL)
-    if not session_key:
-        missing.append(REQUIRED_SESSION_LABEL)
-    if not (kientuong_api.get("ok") or probe_player.get("ok")):
-        missing.append(REQUIRED_KIENTUONG_LABEL)
-    return missing
+    # Co level => du
+    if kientuong_player_has_level(kientuong_api) or kientuong_player_has_level(probe_player):
+        return []
+    # Ok (du 200) => du, se xu ly Ctnv o succeeded
+    if kientuong_api.get("ok") or probe_player.get("ok"):
+        return []
+    # Ctnv da xac nhan => du
+    k_auth = web_auth.get("kientuong") or {}
+    if k_auth.get("no_character_confirmed"):
+        return []
+    # Probe player chua co level nhung da co body chua player rỗng -> can kiem tra lai level
+    # Chi yeu cau Kien Tuong khi chua co ket luan
+    return [REQUIRED_KIENTUONG_LABEL]
 
 
 def parse_credentials_text(text: str) -> list[BatchAccount]:
     accounts: list[BatchAccount] = []
-    seen: set[str] = set()
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         if "|" in line:
-            account, password = line.split("|", 1)
+            parts = line.split("|")
+            if len(parts) < 2:
+                raise ValueError(f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)")
+            account = parts[0].strip()
+            password = parts[1].strip()
         elif line.count(":") == 1:
             account, password = line.split(":", 1)
+            account = account.strip()
+            password = password.strip()
         else:
-            raise ValueError(f"Dòng {line_number}: cần định dạng user|pass hoặc user:pass")
-        account = account.strip()
+            raise ValueError(f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)")
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
-        identity = account.casefold()
-        if identity in seen:
-            raise ValueError(f"Dòng {line_number}: tài khoản bị trùng")
-        seen.add(identity)
         accounts.append(BatchAccount(len(accounts) + 1, account, password))
         if len(accounts) >= MAX_BATCH_ACCOUNTS:
             break
@@ -1532,11 +1490,9 @@ def batch_check_one(
             if batch_login_rejected_permanently(current_result):
                 login_rejected = True
                 break
-            # Once TCP returns a UID, credentials are proven valid.  Account
-            # Center and Kiện Tướng already did their bounded retries inside
-            # run_api_tests; rerunning the whole pipeline would exceed the
-            # Kiện Tướng retry limit and needlessly repeat TCP login.
-            if (current_result.get("tcp") or {}).get("ok"):
+            # Co UID la pass dung - chi dung khi Kien Tuong da co ket luan Ctnv hoac level
+            tcp_ok = bool((current_result.get("tcp") or {}).get("ok"))
+            if tcp_ok and not missing:
                 break
             if not missing:
                 break
@@ -1691,9 +1647,9 @@ def batch_check_one(
             errors.append(attempt_error)
         if retry_stopped:
             errors.append("đã dừng trước lần kiểm tra lại")
-        succeeded = bool(
-            account_auth.get("ok") or kientuong_ok or tcp_info.get("ok")
-        )
+        # Dung pass (co UID) thi khong bao gio FAIL - chi sai pass moi FAIL
+        tcp_ok = bool(tcp_info.get("ok"))
+        succeeded = tcp_ok
         row["status"] = "OK" if succeeded else "FAIL"
         if login_rejected:
             errors.insert(
@@ -1701,7 +1657,7 @@ def batch_check_one(
                 "FALSE - sai tài khoản hoặc mật khẩu (TCP từ chối), dừng ngay",
             )
             row["status"] = "FAIL"
-        elif gave_up_reason:
+        elif gave_up_reason and not tcp_ok:
             errors.insert(
                 0,
                 gave_up_reason
@@ -1712,8 +1668,7 @@ def batch_check_one(
             reportable_missing = [
                 item
                 for item in missing
-                if item not in {REQUIRED_ACCOUNT_LABEL, REQUIRED_SESSION_LABEL}
-                and not (item == REQUIRED_KIENTUONG_LABEL and row["level"] == "Ctnv")
+                if not (item == REQUIRED_KIENTUONG_LABEL and row["level"] == "Ctnv")
             ]
             if reportable_missing:
                 errors.append(
@@ -1731,7 +1686,7 @@ def batch_check_one(
             dict.fromkeys(e for e in errors if e and e != "None")
         )[:300]
     row["elapsed_ms"] = str(round((time.monotonic() - started) * 1000))
-    if attempt_count and not account_info_found and not kientuong_info_found:
+    if attempt_count and not kientuong_info_found:
         row["_special"] = "1"
     credential.password = ""
     # Error codes are internal retry diagnostics only; never expose or persist them.
@@ -1755,32 +1710,28 @@ def run_batch_core(
     if stop_event is None:
         stop_event = threading.Event()
     rows: list[dict[str, str]] = []
-    chunk_size = max(1, min(workers * 3, 15))
     total = len(credentials)
-    for start in range(0, total, chunk_size):
-        if stop_event.is_set():
-            break
-        chunk = credentials[start:start + chunk_size]
-        with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="sso-batch") as executor:
-            futures = [
-                executor.submit(batch_check_one, credential, tcp_module, timeout, gate, stop_event)
-                for credential in chunk
-            ]
-            for future in as_completed(futures):
-                if stop_event.is_set():
-                    for f in futures:
-                        f.cancel()
-                    break
-                try:
-                    row = future.result()
-                except Exception:
-                    row = {"stt": "-", "account": "-", "status": "FAIL"}
-                rows.append(row)
-                done = len(rows)
-                if done % 50 == 0 or done == total:
-                    print(f"[batch] {done}/{total} done", flush=True)
-                if on_result is not None:
-                    on_result(row)
+    # Streaming: xong 1 acc la day acc tiep ngay, khong doi ca chunk
+    with ThreadPoolExecutor(max_workers=max(1, int(workers)), thread_name_prefix="sso-batch") as executor:
+        futures = [
+            executor.submit(batch_check_one, credential, tcp_module, timeout, gate, stop_event)
+            for credential in credentials
+        ]
+        for future in as_completed(futures):
+            if stop_event.is_set():
+                for f in futures:
+                    f.cancel()
+                break
+            try:
+                row = future.result()
+            except Exception:
+                row = {"stt": "-", "account": "-", "status": "FAIL"}
+            rows.append(row)
+            done = len(rows)
+            if done % 50 == 0 or done == total:
+                print(f"[batch] {done}/{total} done", flush=True)
+            if on_result is not None:
+                on_result(row)
     return rows
 
 
@@ -1886,32 +1837,34 @@ def run_batch(args: argparse.Namespace) -> int:
 PAGE_TEMPLATE = r'''<!doctype html>
 <html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Kiểm tra tài khoản Garena + Kiện Tướng</title><style>
-:root{color-scheme:dark;font-family:Segoe UI,system-ui,sans-serif}body{margin:0;background:#0d1117;color:#e6edf3}
- main{width:min(1800px,calc(100vw - 24px));margin:20px auto;display:grid;gap:22px}
-.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:22px}
-h1{margin:0 0 8px;font-size:20px}h2{margin:0 0 10px;font-size:16px;color:#58a6ff}
-p,small,label{color:#9da7b3;line-height:1.5}
-input,textarea{box-sizing:border-box;width:100%;padding:11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;outline:none}
+:root{color-scheme:dark;font-family:Inter,Segoe UI,system-ui,sans-serif}body{margin:0;background:#0d1117;color:#e6edf3}
+ main{width:min(1120px,calc(100vw - 16px));margin:14px auto;display:grid;gap:14px}
+.card{background:#161b22;border:1px solid #21262d;border-radius:12px;padding:16px;box-shadow:0 1px 0 rgba(255,255,255,.03) inset}
+h1{margin:0 0 6px;font-size:18px}h2{margin:0 0 8px;font-size:15px;color:#58a6ff}
+p,small,label{color:#9da7b3;line-height:1.45;font-size:12.5px}
+input,textarea{box-sizing:border-box;width:100%;padding:9px 11px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;outline:none;font-size:13px}
 input:focus,textarea:focus{border-color:#2f81f7}
-textarea{min-height:140px;resize:vertical;font-family:Consolas,monospace}
-button{margin-top:12px;padding:11px 18px;border:0;border-radius:8px;background:#238636;color:#fff;font-weight:750;cursor:pointer}
+textarea{min-height:110px;resize:vertical;font-family:Consolas,monospace;font-size:12.5px}
+button{margin-top:10px;padding:8px 13px;border:0;border-radius:8px;background:#238636;color:#fff;font-weight:650;cursor:pointer;font-size:13px;line-height:1}
 button:disabled{opacity:.5;cursor:not-allowed}
-button.warnb{background:#9e6a03}button.ghost{background:#30363d}
-.btnfile{display:inline-block;margin-top:12px;padding:11px 18px;border-radius:8px;background:#30363d;color:#fff;font-weight:750;cursor:pointer}
-.row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}.row>div{flex:1;min-width:140px}
-#batchStatus{font-weight:650;margin-top:10px}#batchStatus.bad,#result.bad{color:#ff7b72}#result.ok{color:#56d364}.fileinfo,#batchTiming{color:#9da7b3;margin:10px 0 0;font-size:13px}
- .wrap{max-height:520px;overflow:auto;border:1px solid #21262d;border-radius:8px;margin-top:10px}
- table{width:max-content;min-width:2800px;border-collapse:collapse;font-size:13px}
- th,td{border-bottom:1px solid #21262d;padding:8px 10px;text-align:left;white-space:nowrap;vertical-align:top}
-th{color:#8b949e;position:sticky;top:0;background:#161b22}
-tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
-#out{white-space:pre-wrap;overflow-wrap:anywhere;background:#010409;border:1px solid #30363d;border-radius:8px;padding:14px;min-height:60px;margin-top:14px}
+button.warnb{background:#9e6a03}button.ghost{background:#21262d}
+.btnfile{display:inline-block;margin-top:10px;padding:8px 13px;border-radius:8px;background:#21262d;color:#fff;font-weight:650;cursor:pointer;font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}.row>div{flex:1;min-width:120px}
+#batchStatus{font-weight:650;margin-top:10px;font-size:13px}#batchStatus.bad,#result.bad{color:#ff7b72}#result.ok{color:#56d364}.fileinfo,#batchTiming{color:#9da7b3;margin:8px 0 0;font-size:12px}
+ .wrap{max-height:460px;overflow:auto;border:1px solid #21262d;border-radius:10px;margin-top:10px;scrollbar-width:thin}
+ table{width:100%;min-width:780px;border-collapse:collapse;font-size:12.5px;table-layout:auto}
+ th,td{border-bottom:1px solid #21262d;padding:7px 10px;text-align:left;white-space:nowrap;vertical-align:middle}
+th{color:#8b949e;position:sticky;top:0;background:#1c2128;font-weight:600;font-size:11px;letter-spacing:.03em;text-transform:uppercase;z-index:1}
+tr:hover td{background:#1a1f27}
+.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:11px;line-height:1.4}
+tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;color:#fff}
+#out{white-space:pre-wrap;overflow-wrap:anywhere;background:#010409;border:1px solid #30363d;border-radius:8px;padding:12px;min-height:56px;margin-top:10px;font-size:12.5px}
 </style></head><body><main>
 
 <div class="card">
 <h2>Kiểm tra hàng loạt (TCP chính + SSO web dự phòng)</h2>
-<p>Dán danh sách <code>user|pass</code> hoặc <code>user:pass</code>, mỗi dòng một tài khoản. Dòng trống hoặc bắt đầu bằng <code>#</code> bị bỏ qua.</p>
-<textarea id="batchAccounts" placeholder="user1|pass1&#10;user2|pass2&#10;user3:pass3"></textarea>
+<p>Dán danh sách <code>user|pass</code>, <code>user|pass|mail</code>, <code>user|pass|mail|passmail</code> hoặc <code>user:pass</code>, mỗi dòng một tài khoản. Chỉ dùng <code>user</code> và <code>pass</code> để kiểm tra, phần <code>mail</code>/ <code>passmail</code> sẽ bỏ qua. Dòng trống hoặc bắt đầu bằng <code>#</code> bị bỏ qua.</p>
+<textarea id="batchAccounts" placeholder="user1|pass1&#10;user2|pass2|mail@example.com&#10;user3|pass3|mail|passmail&#10;user4:pass4"></textarea>
 <div class="row">
 <div><label>Số luồng (500MB RAM khuyên 5-8)</label><input id="batchWorkers" type="number" min="1" max="8" value="5"></div>
 <div><label>Gap giữa 2 lần đăng nhập (giây, 0–60)</label><input id="batchGap" type="number" min="0" max="60" step="0.5" value="3"></div>
@@ -1921,26 +1874,26 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 <button id="batchStop" type="button" class="warnb">Dừng</button>
 <button id="batchExport" type="button" class="ghost">Xuất CSV</button>
 <button id="splitBtn" type="button" class="ghost">Chia lọc theo cấp độ</button>
-<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 4 tab</button>
+<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 5 tab</button>
 <label class="btnfile">Nhập file<input id="batchImport" type="file" accept=".txt,.csv,text/plain" hidden></label>
 <div id="batchFileName" class="fileinfo">Chưa chọn file.</div>
 <div id="batchStatus">Chưa chạy.</div>
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
-<div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Email</th><th>Xác thực email</th><th>Số điện thoại</th><th>Xác thực 2 bước</th><th>Authenticator</th><th>Session Key SSO</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>Yêu cầu xóa</th><th>ms</th><th>Đăng nhập LQ gần nhất</th><th>IP đăng nhập</th></tr></thead>
+<div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng ngay cả khi bước lấy SSO bị lỗi. Hồ sơ Garena và Kiện Tướng được kiểm tra tiếp; Kiện Tướng chỉ thử lại tối đa 2 lần và chỉ ghi <code>Ctnv</code> khi API xác nhận phản hồi chưa tạo nhân vật lặp lại. Timeout, giới hạn truy cập hoặc lỗi OAuth không bị coi là chưa tạo nhân vật. Hồ sơ Garena không đọc được sau retry sẽ để trống các cột liên quan. Lịch sử đăng nhập được duyệt hết để lấy lần Liên Quân Mobile mới nhất; nếu toàn bộ lịch sử khả dụng không có thì ghi <code>OFF trên 1 tháng</code>. XLSX có bốn tab Đạt, Không đạt, Đặc biệt và FAIL; cột Tài khoản trong cả bốn tab có dạng <code>user|pass</code>. Giao diện web chỉ hiển thị username. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng. Chỉ kiểm tra Kiện Tướng (bỏ qua hồ sơ Garena/email); Kiện Tướng chỉ thử lại tối đa 2 lần và chỉ ghi <code>Ctnv</code> khi API xác nhận phản hồi chưa tạo nhân vật lặp lại. Timeout hoặc lỗi OAuth không bị coi là chưa tạo nhân vật. XLSX có năm tab Đạt, Không đạt, Bị khóa, Đặc biệt và FAIL; cột Tài khoản trong cả năm tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
 <div style="display:flex;gap:18px;flex-wrap:wrap">
 <div style="flex:1;min-width:300px">
 <h3 style="color:#56d364;margin:0 0 8px;font-size:14px">✅ Đạt yêu cầu (<span id="metCount">0</span> acc)</h3>
-<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th></tr></thead>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>ms</th></tr></thead>
 <tbody id="metBody"></tbody></table></div>
 </div>
 <div style="flex:1;min-width:300px">
 <h3 style="color:#ff7b72;margin:0 0 8px;font-size:14px">❌ Không đạt (<span id="notMetCount">0</span> acc)</h3>
-<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>Session Key</th></tr></thead>
+<div class="wrap" style="max-height:360px"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên KT</th><th>Cấp</th><th>Trạng thái KT</th><th>ms</th></tr></thead>
 <tbody id="notMetBody"></tbody></table></div>
 </div>
 </div>
@@ -1949,7 +1902,7 @@ tr.ok td:nth-child(3){color:#56d364}tr.fail td:nth-child(3){color:#ff7b72}
 
 <div class="card">
 <h2>Kiểm tra lẻ</h2>
-<form id="f" autocomplete="off"><input id="credential" type="password" maxlength="1200" autocomplete="off" placeholder="user|pass" required>
+<form id="f" autocomplete="off"><input id="credential" type="password" maxlength="1200" autocomplete="off" placeholder="user|pass hoặc user|pass|mail|passmail" required>
 <button id="b" type="submit">Chạy kiểm tra API</button></form>
 <pre id="out">Chưa thực hiện.</pre>
 <small class="warn">Không vượt CAPTCHA/2FA. Email được hiển thị theo yêu cầu; SĐT, giấy tờ vẫn được che. Session Key SSO hiển thị khi đăng nhập thành công. Chỉ chạy tại 127.0.0.1.</small>
@@ -1972,9 +1925,9 @@ async function getState(){const r=await fetch('/api/batch/state',{cache:'no-stor
 function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.className=bad?'bad':'';}
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
-function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.email,r.email_status,r.mobile,r.two_step,r.authenticator,r.session_key,r.name,r.level,r.player_status,r.deletion_status,r.elapsed_ms,r.latest_login,r.login_ip].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
+function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
 async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
-function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';tr.innerHTML='<td>'+[r.stt,r.account,r.status,r.uid,r.name,r.level,r.player_status,r.session_key].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
+function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
 $('splitBtn').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
  const lv=parseInt($('requiredLevel').value,10)||12;
@@ -2009,7 +1962,7 @@ $('batchAccounts').addEventListener('input',()=>{if($('batchAccounts').value){ba
 $('batchImport').addEventListener('change',ev=>{const f=ev.target.files&&ev.target.files[0];if(!f)return;const rd=new FileReader();rd.onload=()=>{batchFileText=String(rd.result||'');batchFileName=f.name;$('batchAccounts').value='';$('batchFileName').textContent='Đã chọn file: '+batchFileName;setStatus('Đã nạp file, nội dung được giữ ẩn.',false);};rd.onerror=()=>{batchFileText='';batchFileName='';$('batchFileName').textContent='Không đọc được file.';setStatus('Không đọc được file đã chọn.',true);};rd.readAsText(f,'utf-8');ev.target.value='';});
 $('batchExport').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả để xuất',true);return;}
-   const cols=['stt','account','status','uid','email','email_status','mobile','two_step','authenticator','session_key','name','level','player_status','deletion_status','elapsed_ms','latest_login','login_ip'];
+   const cols=['stt','account','status','uid','name','level','player_status','deletion_status','elapsed_ms'];
  const q=v=>{v=String(v==null?'':v);return /[",\n\r]/.test(v)?'"'+v.replace(/"/g,'""')+'"':v;};
  const csv='\ufeff'+cols.join(',')+'\n'+lastRows.map(r=>cols.map(c=>q(r[c])).join(',')).join('\r\n');
  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='ketqua_batch.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),2000);});
@@ -2066,16 +2019,56 @@ def page_html(csrf_token: str) -> bytes:
     return PAGE_TEMPLATE.replace("__TOKEN__", token_js).encode("utf-8")
 
 
+class BatchServerState:
+    """Batch state shared by every local HTTP listening port."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.running = False
+        self.stopped = threading.Event()
+        self.total = 0
+        self.rows: list[dict[str, str]] = []
+        self.started_at = 0.0
+        self.elapsed_ms = 0
+        self.required_level = 12
+
+
 class ApiTestServer(tcp_ui.LoginTestServer):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *args: Any,
+        batch_state: BatchServerState | None = None,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
-        self.batch_lock = threading.Lock()
-        self.batch_running = False
-        self.batch_stopped = threading.Event()
-        self.batch_total = 0
-        self.batch_rows: list[dict[str, str]] = []
-        self.batch_started_at = 0.0
-        self.batch_elapsed_ms = 0
+        self.batch_state = batch_state or BatchServerState()
+
+    batch_lock = property(lambda self: self.batch_state.lock)
+    batch_stopped = property(lambda self: self.batch_state.stopped)
+    batch_running = property(
+        lambda self: self.batch_state.running,
+        lambda self, value: setattr(self.batch_state, "running", value),
+    )
+    batch_total = property(
+        lambda self: self.batch_state.total,
+        lambda self, value: setattr(self.batch_state, "total", value),
+    )
+    batch_rows = property(
+        lambda self: self.batch_state.rows,
+        lambda self, value: setattr(self.batch_state, "rows", value),
+    )
+    batch_started_at = property(
+        lambda self: self.batch_state.started_at,
+        lambda self, value: setattr(self.batch_state, "started_at", value),
+    )
+    batch_elapsed_ms = property(
+        lambda self: self.batch_state.elapsed_ms,
+        lambda self, value: setattr(self.batch_state, "elapsed_ms", value),
+    )
+    batch_required_level = property(
+        lambda self: self.batch_state.required_level,
+        lambda self, value: setattr(self.batch_state, "required_level", value),
+    )
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2285,7 +2278,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 with self.server.batch_lock:
                     rows=[dict(r) for r in self.server.batch_rows]
-            met,not_met,special,failed=[],[],[],[]
+            met,not_met,locked,special,failed=[],[],[],[],[]
             for r in rows:
                 if str(r.get("status") or "").upper() == "FAIL":
                     failed.append(r)
@@ -2295,6 +2288,9 @@ class Handler(BaseHTTPRequestHandler):
                 # instead of also classifying their empty level as not met.
                 if str(r.get("_special") or "") == "1":
                     special.append(r)
+                    continue
+                if str(r.get("player_status") or "").strip() == "Bị khóa":
+                    locked.append(r)
                     continue
                 lv=r.get("level","").strip()
                 if lv.isdigit() and int(lv)>=required_level:
@@ -2308,15 +2304,17 @@ class Handler(BaseHTTPRequestHandler):
                 header_font=Font(bold=True,color="FFFFFF")
                 header_fill=PatternFill(start_color="238636",end_color="238636",fill_type="solid")
                 not_met_fill=PatternFill(start_color="9e6a03",end_color="9e6a03",fill_type="solid")
+                locked_fill=PatternFill(start_color="c2410c",end_color="c2410c",fill_type="solid")
                 special_fill=PatternFill(start_color="8250df",end_color="8250df",fill_type="solid")
                 failed_fill=PatternFill(start_color="da3633",end_color="da3633",fill_type="solid")
-                col_names=["stt","account","status","uid","email","email_status","mobile","two_step","authenticator","session_key","name","level","player_status","deletion_status","elapsed_ms","latest_login","login_ip"]
-                col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Email","Xác thực email","SĐT","2FA","Authenticator","Session Key","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms","Đăng nhập LQ gần nhất","IP đăng nhập"]
+                col_names=["stt","account","status","uid","name","level","player_status","deletion_status","elapsed_ms"]
+                col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms"]
                 sheets=[
                     (0,met,"Đạt",header_fill),
                     (1,not_met,"Không đạt",not_met_fill),
-                    (2,special,"Đặc biệt",special_fill),
-                    (3,failed,"FAIL",failed_fill),
+                    (2,locked,"Bị khóa",locked_fill),
+                    (3,special,"Đặc biệt",special_fill),
+                    (4,failed,"FAIL",failed_fill),
                 ]
                 for idx,data_list,label,fill in sheets:
                     ws=wb.active if idx==0 else wb.create_sheet()
@@ -2354,10 +2352,18 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > MAX_BODY:
             self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
         try:
-            body=json.loads(self.rfile.read(length).decode("utf-8"));credential=str(body.get("credential", ""))
-            account,password=credential.split("|",1);account=account.strip()
+            body=json.loads(self.rfile.read(length).decode("utf-8"));credential=str(body.get("credential", "")).strip()
+            if "|" in credential:
+                parts=credential.split("|")
+                if len(parts) < 2:
+                    raise ValueError("invalid format")
+                account=parts[0].strip();password=parts[1].strip()
+            elif credential.count(":") == 1:
+                account,password=credential.split(":",1);account=account.strip();password=password.strip()
+            else:
+                raise ValueError("invalid format")
         except (UnicodeDecodeError,json.JSONDecodeError,AttributeError,ValueError):
-            self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Nhập đúng định dạng user|pass"});return
+            self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Nhập đúng định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)"});return
         if not account or not password or len(account)>128 or len(password)>1024:
             self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Tài khoản/mật khẩu trống hoặc quá dài"});return
         if not TEST_LOCK.acquire(blocking=False):
@@ -2374,7 +2380,13 @@ class Handler(BaseHTTPRequestHandler):
 
 def parse_args() -> argparse.Namespace:
     parser=argparse.ArgumentParser(description="Kiểm tra tài khoản Garena và hồ sơ Kiện Tướng")
-    parser.add_argument("--port",type=int,default=8766,help="Cổng localhost (mặc định: 8766)")
+    parser.add_argument(
+        "--port",
+        dest="ports",
+        action="append",
+        type=int,
+        help="Cổng HTTP; lặp tùy chọn để mở nhiều cổng (mặc định local: 5555)",
+    )
     parser.add_argument("--timeout",type=float,default=20.0,help="Timeout mỗi request, 1..60 giây")
     parser.add_argument("--no-browser",action="store_true",help="Không tự mở Chrome")
     parser.add_argument("--self-test",action="store_true",help="Kiểm tra source/hash, không đăng nhập")
@@ -2383,11 +2395,48 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Check SSO DNS/TCP/TLS/HTTP without sending credentials or tokens",
     )
-    parser.add_argument("--file",type=Path,default=None,help="Chạy batch: file UTF-8 dạng user|pass hoặc user:pass, mỗi dòng một tài khoản")
+    parser.add_argument("--file",type=Path,default=None,help="Chạy batch: file UTF-8 dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass), mỗi dòng một tài khoản; chỉ dùng user|pass để kiểm tra")
     parser.add_argument("--workers",type=int,default=2,help="Số luồng song song khi batch, 1..8 (mặc định 2)")
     parser.add_argument("--start-gap",type=float,default=3.0,help="Giãn cách tối thiểu giữa hai lần bắt đầu đăng nhập SSO, giây (mặc định 3)")
     parser.add_argument("--csv",type=Path,default=None,help="Ghi kết quả batch ra file CSV này (mã hóa utf-8-sig)")
     return parser.parse_args()
+
+
+def configured_server_ports(
+    cli_ports: list[int] | None,
+    *,
+    port_env: str = "",
+    ports_env: str = "",
+    render: bool = False,
+) -> list[int]:
+    """Resolve unique listening ports while preserving the configured order."""
+
+    if render and port_env.strip():
+        raw_values = [port_env]
+    elif cli_ports:
+        raw_values = [str(port) for port in cli_ports]
+    elif ports_env.strip():
+        raw_values = ports_env.replace(";", ",").replace(" ", ",").split(",")
+    elif port_env.strip():
+        raw_values = [port_env]
+    else:
+        raw_values = ["5555"]
+
+    ports: list[int] = []
+    for raw_value in raw_values:
+        if not str(raw_value).strip():
+            continue
+        try:
+            port = int(str(raw_value).strip())
+        except ValueError as exc:
+            raise ValueError(f"Port không hợp lệ: {raw_value}") from exc
+        if not 1024 <= port <= 65535:
+            raise ValueError(f"Port phải trong khoảng 1024..65535: {port}")
+        if port not in ports:
+            ports.append(port)
+    if not ports:
+        raise ValueError("Danh sách port trống")
+    return ports
 
 
 def main() -> int:
@@ -2396,10 +2445,17 @@ def main() -> int:
         if not 1<=args.workers<=8:raise SystemExit("--workers phải trong khoảng 1..8")
         if not 0<=args.start_gap<=60:raise SystemExit("--start-gap phải trong khoảng 0..60 giây")
         return run_batch(args)
-    host=os.environ.get("HOST","0.0.0.0" if os.environ.get("RENDER") else "127.0.0.1").strip() or "127.0.0.1"
-    try:port=int(os.environ.get("PORT",str(args.port)))
-    except ValueError:port=args.port
-    if not 1024<=port<=65535:raise SystemExit("Port phải trong khoảng 1024..65535")
+    is_render=bool(os.environ.get("RENDER"))
+    host=os.environ.get("HOST","0.0.0.0" if is_render else "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        ports=configured_server_ports(
+            args.ports,
+            port_env=os.environ.get("PORT", ""),
+            ports_env=os.environ.get("PORTS", ""),
+            render=is_render,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if not 1.0<=args.timeout<=60.0:raise SystemExit("Timeout phải trong khoảng 1..60 giây")
     if args.sso_diagnostics:
         result = public_sso_diagnostics(args.timeout)
@@ -2426,15 +2482,51 @@ def main() -> int:
             raise SystemExit("SELF-TEST FAIL: no-character response rejected")
         if kientuong_no_character_response({"ok": False, "status": 429, "body": {}}):
             raise SystemExit("SELF-TEST FAIL: rate limit treated as no character")
+        if configured_server_ports([5555, 5556, 5555]) != [5555, 5556]:
+            raise SystemExit("SELF-TEST FAIL: repeated HTTP ports")
+        if configured_server_ports(None, ports_env="5555, 6000") != [5555, 6000]:
+            raise SystemExit("SELF-TEST FAIL: PORTS parsing")
         print("SELF-TEST OK: TCP module và localhost handler đã nạp.");return 0
-    csrf=secrets.token_urlsafe(32);server=ApiTestServer((host,port),Handler,tcp_module,csrf,args.timeout)
+    csrf=secrets.token_urlsafe(32)
+    batch_state=BatchServerState()
+    servers: list[ApiTestServer] = []
+    try:
+        for port in ports:
+            servers.append(ApiTestServer(
+                (host,port),Handler,tcp_module,csrf,args.timeout,batch_state=batch_state
+            ))
+    except OSError as exc:
+        for bound_server in servers:
+            bound_server.server_close()
+        raise SystemExit(f"Không mở được cổng {port}: {exc}") from exc
     display_host="127.0.0.1" if host in ("0.0.0.0","::","") else host
-    url=f"http://{display_host}:{server.server_port}/";print(f"Kiểm tra Garena + Kiện Tướng: {url}");print("Ctrl+C để dừng; credential/token không được ghi log.")
-    headless=args.no_browser or bool(os.environ.get("RENDER")) or host not in ("127.0.0.1","localhost")
-    if not headless:threading.Timer(.25,tcp_ui.open_chrome_or_default,args=(url,)).start()
-    try:server.serve_forever(poll_interval=.25)
+    urls=[f"http://{display_host}:{server.server_port}/" for server in servers]
+    print("Kiểm tra Garena + Kiện Tướng đang nghe tại:")
+    for url in urls:
+        print(f"  {url}")
+    print("Các cổng dùng chung kết quả batch. Ctrl+C để dừng; credential/token không được ghi log.")
+    headless=args.no_browser or is_render or host not in ("127.0.0.1","localhost")
+    if not headless:threading.Timer(.25,tcp_ui.open_chrome_or_default,args=(urls[0],)).start()
+    extra_threads = [
+        threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": .25},
+            daemon=True,
+            name=f"http-port-{server.server_port}",
+        )
+        for server in servers[1:]
+    ]
+    for thread in extra_threads:
+        thread.start()
+    try:servers[0].serve_forever(poll_interval=.25)
     except KeyboardInterrupt:print("\nĐã dừng server test.")
-    finally:server.server_close()
+    finally:
+        for server in servers[1:]:
+            server.shutdown()
+        for server in servers:
+            server.server_close()
+        for thread in extra_threads:
+            thread.join(timeout=5)
     return 0
 
 

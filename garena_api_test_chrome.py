@@ -1147,7 +1147,6 @@ class BatchAccount:
 
 def parse_credentials_text(text: str) -> list[BatchAccount]:
     accounts: list[BatchAccount] = []
-    seen: set[str] = set()
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -1161,10 +1160,6 @@ def parse_credentials_text(text: str) -> list[BatchAccount]:
         account = account.strip()
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
-        identity = account.casefold()
-        if identity in seen:
-            raise ValueError(f"Dòng {line_number}: tài khoản bị trùng")
-        seen.add(identity)
         accounts.append(BatchAccount(len(accounts) + 1, account, password))
         if len(accounts) >= MAX_BATCH_ACCOUNTS:
             break
