@@ -131,6 +131,168 @@ def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[Pa
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
 
 
+_PAGE_HTML = """
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Garena Check Tool</title>
+<style>
+:root{color-scheme:dark;font-family:'Segoe UI',system-ui,sans-serif}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0e1117;color:#e6edf3;min-height:100vh;padding:18px}
+.container{max-width:900px;margin:0 auto}
+header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+header h1{font-size:22px;color:#58a6ff}
+header .badge{background:#238636;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:16px}
+.card h2{font-size:16px;margin-bottom:12px;color:#79c0ff}
+textarea{width:100%;height:140px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px;font-family:monospace;font-size:13px;resize:vertical}
+textarea:focus{border-color:#2f81f7;outline:none}
+.row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
+.field{flex:1;min-width:120px}
+.field label{display:block;font-size:13px;color:#8b949e;margin-bottom:4px}
+.field input,.field select{width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px}
+btn,button,.btn{padding:10px 20px;border:0;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px}
+.btn-primary{background:#238636;color:#fff}.btn-primary:hover{background:#2ea043}
+.btn-primary:disabled{opacity:.5;cursor:wait}
+.btn-sm{padding:6px 14px;font-size:12px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
+.stat{background:#0d1117;border-radius:8px;padding:12px;text-align:center}
+.stat .num{font-size:28px;font-weight:800;color:#58a6ff}
+.stat .lbl{font-size:11px;color:#8b949e;margin-top:2px}
+.stat.ok .num{color:#56d364}
+.stat.fail .num{color:#ff7b72}
+.stat.pending .num{color:#d29922}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
+th{text-align:left;padding:8px 6px;border-bottom:2px solid #30363d;color:#8b949e;font-size:11px;text-transform:uppercase}
+td{padding:7px 6px;border-bottom:1px solid #21262d}
+tr:hover{background:#1c2128}
+.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+.tag-ok{background:#23863633;color:#56d364}
+.tag-fail{background:#da363333;color:#ff7b72}
+.tag-run{background:#d2992233;color:#d29922}
+.empty{color:#484f58;text-align:center;padding:30px}
+#toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:99;box-shadow:0 4px 20px #0006}
+.jobs-list{max-height:500px;overflow-y:auto}
+</style>
+</head>
+<body>
+<div class="container">
+<header>
+  <h1>🎮 Garena Check Tool</h1>
+  <span class="badge">MASTER</span>
+</header>
+
+<div class="card">
+  <h2>📋 Gửi danh sách tài khoản</h2>
+  <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass  hoặc  user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
+  <div class="row" style="margin-top:12px">
+    <div class="field"><label>Chunk size</label><input type="number" id="chunkSize" value="100" min="1" max="1000"></div>
+    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button></div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>📊 Danh sách Jobs</h2>
+  <div style="margin-bottom:10px"><button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Refresh</button></div>
+  <div id="jobsList" class="jobs-list"><div class="empty">Chưa có job nào</div></div>
+</div>
+
+<div class="card" id="detailCard" style="display:none">
+  <h2>📝 Chi tiết Job #<span id="detailJobId"></span></h2>
+  <div class="stats" id="detailStats"></div>
+  <div style="margin:10px 0;display:flex;gap:8px">
+    <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
+    <button class="btn btn-sm btn-primary" onclick="exportCsv()" style="background:#1f6feb">📥 Export CSV</button>
+  </div>
+  <div id="detailRows"><div class="empty">Đang tải...</div></div>
+</div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const TOKEN=localStorage.getItem('masterToken')||prompt('Nhập MASTER_TOKEN:','');
+if(TOKEN)localStorage.setItem('masterToken',TOKEN);
+const H={'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};
+let currentJobId=null;
+
+function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
+
+async function api(path,opt={}){const r=await fetch(path,{headers:H,...opt});return r.json()}
+
+async function sendJob(){
+  const text=document.getElementById('accInput').value.trim();
+  if(!text){toast('Nhập danh sách tài khoản!');return}
+  const btn=document.getElementById('btnSend');btn.disabled=true;btn.textContent='⏳ Đang gửi...';
+  try{
+    const chunk_size=parseInt(document.getElementById('chunkSize').value)||100;
+    const d=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,chunk_size})});
+    if(d.ok){toast('✅ Tạo Job #'+d.job_id+' ('+d.total+' acc)');document.getElementById('accInput').value='';loadJobs();viewJob(d.job_id)}
+    else toast('❌ '+d.error)
+  }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;btn.textContent='🚀 Gửi check'}
+}
+
+async function loadJobs(){
+  const el=document.getElementById('jobsList');
+  try{
+    const d=await api('/api/jobs_list');
+    if(!d.ok||!d.jobs||d.jobs.length===0){el.innerHTML='<div class="empty">Chưa có job nào</div>';return}
+    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>OK</th><th>Fail</th><th></th></tr>';
+    d.jobs.forEach(j=>{
+      const st=j.status==='done'?'<span class="tag tag-ok">Xong</span>':'<span class="tag tag-run">Đang chạy</span>';
+      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td>';
+      h+='<td><button class="btn btn-sm btn-primary" onclick="viewJob('+j.id+')">Xem</button></td></tr>'
+    });
+    el.innerHTML=h+'</table>'
+  }catch(e){el.innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
+}
+
+async function viewJob(id){
+  currentJobId=id;
+  document.getElementById('detailCard').style.display='block';
+  document.getElementById('detailJobId').textContent=id;
+  refreshDetail();
+}
+
+async function refreshDetail(){
+  if(!currentJobId)return;
+  const id=currentJobId;
+  try{
+    const s=await api('/api/jobs/'+id);
+    if(!s.ok){document.getElementById('detailStats').innerHTML='<div class="empty">'+s.error+'</div>';return}
+    const c=s.chunks||{},r=s.results||{};
+    document.getElementById('detailStats').innerHTML=
+      '<div class="stat"><div class="num">'+s.total+'</div><div class="lbl">Tổng</div></div>'+
+      '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
+      '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Fail</div></div>'+
+      '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
+      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
+
+    const rd=await api('/api/jobs/'+id+'/rows');
+    if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
+    let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Thời gian</th></tr>';
+    rd.rows.forEach(r=>{
+      const tag=r.status==='OK'?'tag-ok':'tag-fail';
+      h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
+      h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+r.elapsed_ms+'ms</td></tr>'
+    });
+    document.getElementById('detailRows').innerHTML=h+'</table>';
+    if(s.status!=='done')setTimeout(refreshDetail,5000)
+  }catch(e){document.getElementById('detailRows').innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
+}
+
+function exportCsv(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.csv?token='+TOKEN)}
+
+loadJobs();setInterval(loadJobs,15000);
+</script>
+</body>
+</html>
+"""
+
+
 class MasterHandler(BaseHTTPRequestHandler):
     server: "CoordinatorServer"
 
@@ -139,19 +301,27 @@ class MasterHandler(BaseHTTPRequestHandler):
 
     def _authorized(self) -> bool:
         token = self.server.master_token
+        if not token:
+            return True
         header = self.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
-            return False
-        return secrets.compare_digest(header[7:].strip(), token)
+        if header.startswith("Bearer "):
+            return secrets.compare_digest(header[7:].strip(), token)
+        # Hỗ trợ token qua query string cho export CSV
+        if "?" in self.path:
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            qt = qs.get("token", [""])[0]
+            if qt and secrets.compare_digest(qt, token):
+                return True
+        return False
 
     def _security_headers(self, content_type: str) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Pragma", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'none'")
 
     def _json(self, status: HTTPStatus, value: Any) -> None:
         body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -176,17 +346,39 @@ class MasterHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("JSON không hợp lệ") from exc
 
+    def _html(self, html: str) -> None:
+        body = html.encode("utf-8")
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def _clean_path(self) -> str:
+        """Return path without query string."""
+        p = self.path
+        if "?" in p:
+            p = p.split("?", 1)[0]
+        return p
+
     def do_GET(self) -> None:
-        if self.path == "/healthz":
+        path = self._clean_path()
+        if path == "/healthz":
             self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
+            return
+        if path == "/" or path == "/index.html":
+            self._html(_PAGE_HTML)
             return
         if not self._authorized():
-            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token không hợp lệ"})
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token kh\u00f4ng h\u1ee3p l\u1ec7"})
             return
-        if self.path == "/_healthz_auth":
-            self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
+        if path == "/api/jobs_list":
+            self._handle_jobs_list()
             return
-        parts = self.path.strip("/").split("/")
+        parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "jobs":
             job_id = self._int_or_none(parts[2])
             if job_id is None:
@@ -237,6 +429,31 @@ class MasterHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
 
     # --- handlers -----------------------------------------------------
+
+    def _handle_jobs_list(self) -> None:
+        store = self.server.store
+        with store._lock:
+            jobs_raw = store._conn.execute(
+                "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs ORDER BY id DESC LIMIT 50"
+            ).fetchall()
+            jobs = []
+            for row in jobs_raw:
+                job_id = row[0]
+                results = store._conn.execute(
+                    "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) "
+                    "FROM results WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+                results_count = results[0] or 0
+                ok_count = results[1] or 0
+                jobs.append({
+                    "id": job_id,
+                    "total": row[2],
+                    "status": row[4],
+                    "ok": ok_count,
+                    "fail": results_count - ok_count,
+                })
+        self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs})
 
     def _handle_create_job(self) -> None:
         try:
