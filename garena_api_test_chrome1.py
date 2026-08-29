@@ -1352,8 +1352,8 @@ REQUIRED_ACCOUNT_LABEL = "hồ sơ tài khoản"
 REQUIRED_SESSION_LABEL = "session_key"
 REQUIRED_KIENTUONG_LABEL = "Kiện Tướng"
 
-MAX_EMPTY_ATTEMPTS = 5
-BATCH_ROW_DEADLINE_SECONDS = 60.0
+MAX_EMPTY_ATTEMPTS = 8
+BATCH_ROW_DEADLINE_SECONDS = 90.0
 BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
@@ -1513,6 +1513,10 @@ def batch_check_one(
                 )
                 break
         backoff = min(1.5 * attempt_count, 8.0)
+        # FAIL nhanh (< 500ms) thường là rate limit/connection - đợi lâu hơn
+        elapsed_so_far = time.monotonic() - started
+        if elapsed_so_far < 0.5 * attempt_count:
+            backoff = max(backoff, 3.0)
         if stop_event.wait(backoff) or not gate.wait(stop_event):
             retry_stopped = True
             break
