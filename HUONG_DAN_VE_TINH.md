@@ -55,7 +55,7 @@ Ví dụ: 15 workers × 3 chunks = 45 acc check đồng thời
 | A51 (6GB RAM) | 8-15 | 2-3 | 2.0 | 16-45 |
 | PC trung bình | 15 | 3 | 2.0 | 45 |
 | PC mạnh / VPS | 20 | 5 | 1.5 | 100 |
-| Render Free (Web) | 15 | 3 | 2.0 | 45 |
+| Render Free (Web) | 1 | 15 | 0 | 15 |
 
 ---
 
@@ -237,9 +237,9 @@ Nhấn `Ctrl+C` hoặc kill tmux session: `tmux kill-session -t sat`
 | `MASTER_URL` | `https://checkpass-4grp.onrender.com` |
 | `MASTER_TOKEN` | `Zocl00zonx.` |
 | `SATELLITE_ID` | `render-sat-1` |
-| `WORKERS` | `15` |
-| `CONCURRENT_CHUNKS` | `3` |
-| `START_GAP` | `2.0` |
+| `WORKERS` | `1` |
+| `CONCURRENT_CHUNKS` | `15` |
+| `START_GAP` | `0` |
 | `TIMEOUT` | `20.0` |
 | `POLL_INTERVAL` | `10` |
 | `PYTHON_VERSION` | `3.13.4` |
@@ -278,9 +278,9 @@ Vào Render Dashboard → chọn service → **Suspend**
 |----------|-----------|--------------|---------|--------|------------|
 | PC nhà | Windows | `pc-home` | 15 | 3 | 45 |
 | A51 | Termux | `a51-local` | 8 | 2 | 16 |
-| Render #1 | Web Service | `render-sat-1` | 15 | 3 | 45 |
-| Render #2 | Web Service | `render-sat-2` | 15 | 3 | 45 |
-| | | | | **Tổng** | **151** |
+| Render #1 | Web Service | `render-sat-1` | 1 | 15 | 15 |
+| Render #2 | Web Service | `render-sat-2` | 1 | 15 | 15 |
+| | | | | **Tổng** | **91** |
 
 ### Xem vệ tinh nào đang hoạt động
 
