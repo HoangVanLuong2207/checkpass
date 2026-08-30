@@ -201,7 +201,7 @@ Nhấn `Ctrl+C` hoặc kill tmux session: `tmux kill-session -t sat`
 > ⚠️ **Render KHÔNG có gói Free cho Background Worker**, chỉ có **Web Service** mới có free plan.
 > Satellite worker được thiết kế để chạy như Web Service: bind port HTTP (Render truyền qua env `PORT`),
 > phục vụ `/healthz`, đồng thời chạy worker loop ở background thread.
-> Có cơ chế **tự ping mỗi 10 phút** để tránh Render spin down do không có traffic.
+> Có cơ chế **tự ping mỗi 5 phút** để tránh Render spin down do không có traffic.
 
 ### Ưu điểm
 - Gói Free, không mất tiền
@@ -250,7 +250,7 @@ Nhấn `Ctrl+C` hoặc kill tmux session: `tmux kill-session -t sat`
 
 ### Cơ chế chống ngủ (self-ping)
 Satellite worker có thread tự gửi HTTP request đến chính mình (`http://127.0.0.1:{PORT}/healthz`)
-mỗi **10 phút** để Render không spin down service. Không cần cài thêm gì.
+mỗi **5 phút** để Render không spin down service. Không cần cài thêm gì.
 
 ### Thêm vệ tinh Render thứ 2
 

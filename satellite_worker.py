@@ -112,7 +112,7 @@ def _self_ping_loop() -> None:
     import urllib.request as _ur
     ping_url = f"http://127.0.0.1:{HEALTH_PORT}/healthz"
     while True:
-        time.sleep(600)  # 10 phút
+        time.sleep(300)  # 5 phút
         try:
             with _ur.urlopen(ping_url, timeout=10):
                 pass
