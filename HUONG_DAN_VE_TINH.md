@@ -55,7 +55,7 @@ Ví dụ: 15 workers × 3 chunks = 45 acc check đồng thời
 | A51 (6GB RAM) | 8-15 | 2-3 | 2.0 | 16-45 |
 | PC trung bình | 15 | 3 | 2.0 | 45 |
 | PC mạnh / VPS | 20 | 5 | 1.5 | 100 |
-| Render Free | 8 | 2 | 3.0 | 16 |
+| Render Free (Web) | 15 | 3 | 2.0 | 45 |
 
 ---
 
@@ -196,32 +196,39 @@ Nhấn `Ctrl+C` hoặc kill tmux session: `tmux kill-session -t sat`
 
 ---
 
-## Môi trường 3: Render Background Worker
+## Môi trường 3: Render Web Service (Free)
+
+> ⚠️ **Render KHÔNG có gói Free cho Background Worker**, chỉ có **Web Service** mới có free plan.
+> Satellite worker được thiết kế để chạy như Web Service: bind port HTTP (Render truyền qua env `PORT`),
+> phục vụ `/healthz`, đồng thời chạy worker loop ở background thread.
+> Có cơ chế **tự ping mỗi 10 phút** để tránh Render spin down do không có traffic.
 
 ### Ưu điểm
-- Chạy 24/7, không ngủ (khác Web Service)
+- Gói Free, không mất tiền
 - Không cần quản lý server
 - Tự deploy khi push code
+- Tự ping giữ cho service không bị ngủ
 
 ### Giới hạn Free Plan
 - **750 giờ/tháng** (chia cho tất cả free services)
 - **512 MB RAM**, CPU giới hạn
-- Nên để WORKERS thấp (8), CONCURRENT_CHUNKS nhỏ (2)
+- Nên để WORKERS vừa phải, CONCURRENT_CHUNKS nhỏ
 
 ### Cài đặt
 
 1. Vào **https://dashboard.render.com**
-2. **New** → **Background Worker** (⚠️ KHÔNG chọn Web Service)
+2. **New** → **Web Service**
 3. Kết nối repo **GitHub**: `HoangVanLuong2207/checkpass`
 4. Cấu hình:
 
 | Mục | Giá trị |
-|-----|---------|
+|-----|--------|
 | Name | `garena-satellite-1` |
 | Runtime | Python |
 | Build Command | `pip install -r requirements.txt` |
 | Start Command | `python satellite_worker.py` |
 | Plan | Free |
+| Health Check Path | `/healthz` |
 
 5. **Environment Variables:**
 
@@ -230,14 +237,20 @@ Nhấn `Ctrl+C` hoặc kill tmux session: `tmux kill-session -t sat`
 | `MASTER_URL` | `https://checkpass-4grp.onrender.com` |
 | `MASTER_TOKEN` | `Zocl00zonx.` |
 | `SATELLITE_ID` | `render-sat-1` |
-| `WORKERS` | `8` |
-| `CONCURRENT_CHUNKS` | `2` |
-| `START_GAP` | `3.0` |
+| `WORKERS` | `15` |
+| `CONCURRENT_CHUNKS` | `3` |
+| `START_GAP` | `2.0` |
 | `TIMEOUT` | `20.0` |
 | `POLL_INTERVAL` | `10` |
 | `PYTHON_VERSION` | `3.13.4` |
 
-6. Bấm **Create Background Worker**
+> **Lưu ý:** Không cần set `PORT` — Render tự truyền. Code tự đọc `PORT` từ env.
+
+6. Bấm **Create Web Service**
+
+### Cơ chế chống ngủ (self-ping)
+Satellite worker có thread tự gửi HTTP request đến chính mình (`http://127.0.0.1:{PORT}/healthz`)
+mỗi **10 phút** để Render không spin down service. Không cần cài thêm gì.
 
 ### Thêm vệ tinh Render thứ 2
 
@@ -265,9 +278,9 @@ Vào Render Dashboard → chọn service → **Suspend**
 |----------|-----------|--------------|---------|--------|------------|
 | PC nhà | Windows | `pc-home` | 15 | 3 | 45 |
 | A51 | Termux | `a51-local` | 8 | 2 | 16 |
-| Render #1 | BG Worker | `render-sat-1` | 8 | 2 | 16 |
-| Render #2 | BG Worker | `render-sat-2` | 8 | 2 | 16 |
-| | | | | **Tổng** | **93** |
+| Render #1 | Web Service | `render-sat-1` | 15 | 3 | 45 |
+| Render #2 | Web Service | `render-sat-2` | 15 | 3 | 45 |
+| | | | | **Tổng** | **151** |
 
 ### Xem vệ tinh nào đang hoạt động
 

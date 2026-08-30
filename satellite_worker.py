@@ -38,7 +38,8 @@ TIMEOUT = float(_env("TIMEOUT", "20.0") or "20.0")
 LEASE_MINUTES = float(_env("LEASE_MINUTES", "60") or "60")
 CONCURRENT_CHUNKS = int(_env("CONCURRENT_CHUNKS", "3") or "3")
 POLL_INTERVAL = float(_env("POLL_INTERVAL", "15") or "15")
-HEALTH_PORT = int(_env("HEALTH_PORT", "8765") or "8765")
+# Render Web Service truyền PORT; fallback HEALTH_PORT cho local
+HEALTH_PORT = int(_env("PORT", "") or _env("HEALTH_PORT", "8765") or "8765")
 HEALTH_HOST = _env("HEALTH_HOST", "0.0.0.0") or "0.0.0.0"
 
 
@@ -100,9 +101,23 @@ class _Health(BaseHTTPRequestHandler):
 def _run_health_server() -> None:
     try:
         server = ThreadingHTTPServer((HEALTH_HOST, HEALTH_PORT), _Health)
+        print(f"[satellite] health server listening on {HEALTH_HOST}:{HEALTH_PORT}", flush=True)
         server.serve_forever(poll_interval=0.5)
     except Exception as exc:
         print(f"[satellite] lỗi health server: {exc}", flush=True)
+
+
+def _self_ping_loop() -> None:
+    """Tự gửi request đến chính mình mỗi 10 phút để Render Free Web Service không bị spin down."""
+    import urllib.request as _ur
+    ping_url = f"http://127.0.0.1:{HEALTH_PORT}/healthz"
+    while True:
+        time.sleep(600)  # 10 phút
+        try:
+            with _ur.urlopen(ping_url, timeout=10):
+                pass
+        except Exception:
+            pass
 
 
 def _process_chunk(client: _Client, tcp_module: Any, claim: dict) -> None:
@@ -221,6 +236,9 @@ def main() -> int:
         print("[satellite] CẢNH BÁO: chưa đặt MASTER_TOKEN", flush=True)
     health_thread = threading.Thread(target=_run_health_server, daemon=True, name="health")
     health_thread.start()
+    # Self-ping để Render Free Web Service không spin down
+    ping_thread = threading.Thread(target=_self_ping_loop, daemon=True, name="self-ping")
+    ping_thread.start()
     _worker_loop()
     return 0
 
