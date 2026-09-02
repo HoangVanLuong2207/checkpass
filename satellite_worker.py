@@ -251,14 +251,24 @@ def _worker_loop() -> None:
                 future.add_done_callback(on_chunk_done)
 
             except Exception as exc:
-                print(f"[satellite] loi vong lap: {exc}; cho {POLL_INTERVAL}s", flush=True)
-                time.sleep(POLL_INTERVAL)
+                err_msg = str(exc)
+                # Phân biệt lỗi auth (401) với lỗi mạng thường — nếu auth fail thì chờ lâu hơn, không spam
+                if "401" in err_msg or "token" in err_msg.lower() or "không hợp lệ" in err_msg.lower() or "unauthorized" in err_msg.lower():
+                    print(f"[satellite] LỖI AUTH: {err_msg}", flush=True)
+                    print(f"[satellite] Kiểm tra MASTER_TOKEN của vệ tinh có khớp với master server không!", flush=True)
+                    print(f"[satellite] MASTER_TOKEN hiện tại: '{MASTER_TOKEN[:4]}***{MASTER_TOKEN[-2:]}' (len={len(MASTER_TOKEN)})", flush=True)
+                    time.sleep(60)  # Chờ 60s trước khi thử lại, tránh spam
+                else:
+                    print(f"[satellite] loi vong lap: {err_msg}; cho {POLL_INTERVAL}s", flush=True)
+                    time.sleep(POLL_INTERVAL)
 
 
 def main() -> int:
     tcp_ui.configure_console_encoding()
     if not MASTER_TOKEN:
         print("[satellite] CẢNH BÁO: chưa đặt MASTER_TOKEN", flush=True)
+    else:
+        print(f"[satellite] MASTER_TOKEN = '{MASTER_TOKEN[:4]}***{MASTER_TOKEN[-2:]}' (len={len(MASTER_TOKEN)})", flush=True)
     health_thread = threading.Thread(target=_run_health_server, daemon=True, name="health")
     health_thread.start()
     # Self-ping để Render Free Web Service không spin down

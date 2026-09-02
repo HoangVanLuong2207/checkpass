@@ -738,15 +738,15 @@ class MasterHandler(BaseHTTPRequestHandler):
             # Nếu có token, coi như owner riêng
             return {"authorized": True, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token}
         # Nếu token khớp MASTER_TOKEN -> admin / satellite
-        if master_token and token and secrets.compare_digest(token, master_token):
+        if master_token and token and secrets.compare_digest(token.strip(), master_token.strip()):
             return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "admin", "token": token}
         # Nếu token không khớp MASTER_TOKEN, thử verify như license key
         if token:
             ok, info = _verify_license_key(token)
             if ok:
                 return {"authorized": True, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token, "license_info": info}
-            # Nếu master_token rỗng nhưng verify fail -> vẫn cho satellite claim với MASTER_TOKEN? Đã check ở trên
-            # Nếu verify fail, unauthorized
+            # Verify fail — log để debug
+            print(f"[master] auth FAIL: token='{_preview_key(token)}' license_url='{license_url}' info={info}", flush=True)
             return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": token, "license_info": info}
         # Không có token
         return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": ""}
@@ -763,7 +763,17 @@ class MasterHandler(BaseHTTPRequestHandler):
             license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
             if not master_token and not license_url:
                 return {"authorized": True, "is_admin": True, "owner_hash": "", "owner_preview": ""}
-            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "license key không hợp lệ hoặc thiếu. Vui lòng nhập key từ f:license-server"})
+            # Error message chi tiết hơn
+            license_info = info.get("license_info", {})
+            error_detail = license_info.get("error", "") if isinstance(license_info, dict) else ""
+            token = info.get("token", "")
+            if not token:
+                msg = "thiếu license key. Vui lòng nhập key từ license-server"
+            elif error_detail:
+                msg = f"license key không hợp lệ: {error_detail}"
+            else:
+                msg = "license key không hợp lệ hoặc hết hạn. Vui lòng kiểm tra lại key"
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": msg})
             return None
         return info
 
@@ -774,9 +784,17 @@ class MasterHandler(BaseHTTPRequestHandler):
             # Không đặt MASTER_TOKEN → cho phép mọi vệ tinh (tương thích cũ, tránh chặn)
             return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "", "token": ""}
         token = self._extract_token()
-        if token and secrets.compare_digest(token, master_token):
+        if not token:
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "thiếu token vệ tinh (cần MASTER_TOKEN trong header Authorization)"})
+            return None
+        # So sánh an toàn — strip whitespace để tránh lỗi do copy/paste
+        token_clean = token.strip()
+        master_clean = master_token.strip()
+        if token_clean and master_clean and secrets.compare_digest(token_clean, master_clean):
             return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "admin", "token": token}
-        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ (cần MASTER_TOKEN)"})
+        # Debug: log để dễ phát hiện mismatch
+        print(f"[master] satellite auth FAIL: token_len={len(token_clean)} master_len={len(master_clean)} match={token_clean == master_clean}", flush=True)
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ (MASTER_TOKEN không khớp)"})
         return None
 
     def _security_headers(self, content_type: str) -> None:
@@ -1398,8 +1416,12 @@ def main() -> int:
         db_label = f"sqlite={db_path}"
 
     server = CoordinatorServer((host, port), MasterHandler, store, token)
+    license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
     print(f"[master] Tổng bộ: http://{host}:{port}  role=coordinator  db={db_label}")
-    if not token:
+    print(f"[master] LICENSE_SERVER_URL = '{license_url}'")
+    if token:
+        print(f"[master] MASTER_TOKEN = '{token[:4]}***{token[-2:]}' (len={len(token)})")
+    else:
         print("[master] CẢNH BÁO: chưa đặt MASTER_TOKEN - các vệ tinh đều truy cập được. Hãy đặt trên Render.")
     try:
         server.serve_forever(poll_interval=0.5)

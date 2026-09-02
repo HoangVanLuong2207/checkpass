@@ -11,3 +11,5 @@ services:
         value: 3.13.4
       - key: MASTER_TOKEN
         sync: false
+      - key: LICENSE_SERVER_URL
+        sync: false
