@@ -768,19 +768,15 @@ class MasterHandler(BaseHTTPRequestHandler):
         return info
 
     def _require_satellite(self) -> dict[str, Any] | None:
-        """Kiểm tra auth cho endpoint vệ tinh (claim/report/release). Chỉ chấp nhận MASTER_TOKEN hoặc license key hợp lệ nếu không có master_token"""
-        info = self._get_auth_info()
+        """Vệ tinh chỉ cần MASTER_TOKEN, không cần license key. Master có license key là đủ."""
         master_token = self.server.master_token or ""
-        license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
-        # Nếu không đặt gì -> mở
-        if not master_token and not license_url:
-            return {"authorized": True, "is_admin": True, "owner_hash": "", "owner_preview": ""}
-        if info.get("is_admin") or info.get("is_satellite"):
-            return info
-        # Nếu có license server và key hợp lệ, cũng cho phép claim/report? Để vệ tinh có thể dùng license key nếu muốn
-        if info.get("authorized"):
-            return info
-        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ"})
+        if not master_token:
+            # Không đặt MASTER_TOKEN → cho phép mọi vệ tinh (tương thích cũ, tránh chặn)
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "", "token": ""}
+        token = self._extract_token()
+        if token and secrets.compare_digest(token, master_token):
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "admin", "token": token}
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ (cần MASTER_TOKEN)"})
         return None
 
     def _security_headers(self, content_type: str) -> None:
