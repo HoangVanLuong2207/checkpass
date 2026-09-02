@@ -344,9 +344,41 @@ class TursoStore:
             await client.close()
 
     async def _abatch(self, statements: list) -> Any:
+        from libsql_client.client import Statement
         client = await self._aclient()
         try:
-            return await client.batch(statements)
+            converted = []
+            for s in statements:
+                if isinstance(s, dict):
+                    sql = s.get("sql", "")
+                    args = list(s.get("args", []))
+                    converted.append(Statement(sql, args))
+                elif isinstance(s, tuple):
+                    converted.append(Statement.convert(s))
+                elif isinstance(s, str):
+                    converted.append(Statement(s))
+                elif isinstance(s, Statement):
+                    converted.append(s)
+                else:
+                    converted.append(Statement(str(s)))
+            if not converted:
+                return []
+            results = []
+            # Chia nhỏ sub-batch tối đa 50 stmts để không vượt HTTP payload
+            for i in range(0, len(converted), 50):
+                sub = converted[i : i + 50]
+                try:
+                    res = await client.batch(sub)
+                    if isinstance(res, list):
+                        results.extend(res)
+                    else:
+                        results.append(res)
+                except Exception as batch_err:
+                    print(f"[TursoStore] sub-batch fallback ({batch_err}), chay execute rieng le", flush=True)
+                    for single in sub:
+                        res_single = await client.execute(single.sql, list(single.args or []))
+                        results.append(res_single)
+            return results
         finally:
             await client.close()
 
@@ -372,7 +404,16 @@ class TursoStore:
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
             result = _run_async(self._aexec(sql, args))
-            return result.last_insert_rowid if hasattr(result, "last_insert_rowid") else 0
+            rowid = getattr(result, "last_insert_rowid", None)
+            if rowid:
+                return int(rowid)
+            try:
+                row = _run_async(self._afetch("SELECT last_insert_rowid()"))
+                if row and row[0] and row[0][0]:
+                    return int(row[0][0])
+            except Exception:
+                pass
+            return 0
 
     def exec_with_changes(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
@@ -876,11 +917,18 @@ class MasterHandler(BaseHTTPRequestHandler):
                 if not tok:
                     self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
                     return
+                # Kiểm tra có phải MASTER_TOKEN không
+                mt = self.server.master_token or ""
+                is_master = bool(mt and tok and secrets.compare_digest(tok.strip(), mt.strip()))
+                if is_master:
+                    self._json(HTTPStatus.OK, {"ok": True, "valid": True, "is_admin": True, "preview": _preview_key(tok), "info": {"mode": "master_token"}})
+                    return
                 ok, info = _verify_license_key(tok)
                 if ok:
                     self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
                 else:
-                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
+                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info,
+                        "debug": {"token_len": len(tok), "master_token_len": len(mt), "token_preview": _preview_key(tok)}})
                 return
             if path == "/" or path == "/index.html":
                 self._html(_PAGE_HTML)
@@ -972,6 +1020,12 @@ class MasterHandler(BaseHTTPRequestHandler):
                 if not tok:
                     self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
                     return
+                # Kiểm tra có phải MASTER_TOKEN không
+                mt = self.server.master_token or ""
+                is_master = bool(mt and tok and secrets.compare_digest(tok.strip(), mt.strip()))
+                if is_master:
+                    self._json(HTTPStatus.OK, {"ok": True, "valid": True, "is_admin": True, "preview": _preview_key(tok), "info": {"mode": "master_token"}})
+                    return
                 ok, info = _verify_license_key(tok)
                 if ok:
                     self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
@@ -1054,23 +1108,32 @@ class MasterHandler(BaseHTTPRequestHandler):
         store = self.server.store
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
         owner_preview = (auth or {}).get("owner_preview", "") if auth else ""
-        job_id = store.exec(
-            "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
-            (_now(), len(parsed), chunk_size, "open", owner_hash, owner_preview),
-        )
-        chunks = split_chunks(parsed, chunk_size)
-        stmts = []
-        for idx, chunk in enumerate(chunks):
-            accounts_json = json.dumps(
-                [f"{acc.account}|{acc.password}" for acc in chunk],
-                ensure_ascii=False,
+        try:
+            job_id = store.exec(
+                "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+                (_now(), len(parsed), chunk_size, "open", owner_hash, owner_preview),
             )
-            stmts.append({
-                "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
-                "args": [job_id, idx, accounts_json],
-            })
-        if stmts:
-            store.batch(stmts)
+            if not job_id:
+                row = store.fetchone("SELECT MAX(id) FROM jobs")
+                if row and row[0]:
+                    job_id = int(row[0])
+            chunks = split_chunks(parsed, chunk_size)
+            stmts = []
+            for idx, chunk in enumerate(chunks):
+                accounts_json = json.dumps(
+                    [f"{acc.account}|{acc.password}" for acc in chunk],
+                    ensure_ascii=False,
+                )
+                stmts.append({
+                    "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+                    "args": [job_id, idx, accounts_json],
+                })
+            if stmts:
+                store.batch(stmts)
+        except Exception as exc:
+            print(f"[master] Loi luu job vao DB: {exc}", flush=True)
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Lỗi lưu job vào DB: {exc}"[:300]})
+            return
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
