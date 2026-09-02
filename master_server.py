@@ -10,6 +10,7 @@ không chạy Garena check; dữ liệu nằm trong SQLite trên đĩa.
 import argparse
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
@@ -18,6 +19,8 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -29,6 +32,11 @@ MAX_CHUNK_LIMIT = 1000
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 60
 MAX_BODY = 32 * 1024 * 1024
+LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
+LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
+# Cache license: key -> (ok, expiry, info)
+_LICENSE_CACHE: dict[str, tuple[bool, float, dict[str, Any]]] = {}
+_LICENSE_CACHE_LOCK = threading.RLock()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -37,7 +45,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     total INTEGER NOT NULL,
     chunk_size INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'open',
-    finished_at REAL
+    finished_at REAL,
+    owner_hash TEXT DEFAULT '',
+    owner_preview TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_chunks_claim ON chunks(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_chunk ON results(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash);
 """
 
 
@@ -82,6 +93,89 @@ def _run_async(coro):
         with concurrent.futures.ThreadPoolExecutor() as pool:
             return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _preview_key(key: str) -> str:
+    k = key.strip()
+    if len(k) <= 8:
+        return k[:2] + "***" + k[-1:] if len(k) > 3 else "***"
+    return k[:4] + "***" + k[-2:]
+
+
+def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
+    """Gọi license-server HTTP để verify key. Có cache TTL.
+
+    Trả về (ok, info). Nếu LICENSE_SERVER_URL rỗng thì chấp nhận mọi key (dùng cho dev/test).
+    Hỗ trợ cả POST JSON {"key": "..."} và GET ?key=... .
+    Mong license-server trả về {"valid": true} / {"ok": true} / {"success": true} hoặc {"active": true}.
+    """
+    key = (key or "").strip()
+    if not key:
+        return False, {"error": "empty key"}
+    now = time.time()
+    with _LICENSE_CACHE_LOCK:
+        cached = _LICENSE_CACHE.get(key)
+        if cached and cached[1] > now:
+            return cached[0], cached[2]
+    # Nếu không cấu hình license server, chấp nhận mọi key (dev mode) — vẫn chia theo hash
+    license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+    if not license_url:
+        info = {"mode": "no-license-server", "preview": _preview_key(key)}
+        with _LICENSE_CACHE_LOCK:
+            _LICENSE_CACHE[key] = (True, now + LICENSE_CACHE_TTL, info)
+        return True, info
+    # Thử POST JSON trước
+    info: dict[str, Any] = {}
+    ok = False
+    def _check_valid(info_dict: dict[str, Any], status: int) -> bool:
+        if "valid" in info_dict:
+            return bool(info_dict["valid"])
+        if "ok" in info_dict:
+            return bool(info_dict["ok"])
+        if "success" in info_dict:
+            return bool(info_dict["success"])
+        if "active" in info_dict:
+            return bool(info_dict["active"])
+        # Fallback: nếu không có flag explicit và status 200 và không có error thì coi như valid
+        return status == 200 and not info_dict.get("error")
+    try:
+        data = json.dumps({"key": key}).encode("utf-8")
+        req = urllib.request.Request(license_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                body = resp.read().decode("utf-8", errors="ignore")
+                try:
+                    j = json.loads(body)
+                    info = j if isinstance(j, dict) else {"raw": body}
+                except Exception:
+                    info = {"raw": body}
+                ok = _check_valid(info, resp.status)
+        except Exception as e_post:
+            # Fallback GET ?key=
+            sep = "&" if "?" in license_url else "?"
+            get_url = f"{license_url}{sep}key={urllib.parse.quote(key)}"
+            try:
+                with urllib.request.urlopen(get_url, timeout=8) as resp2:
+                    body2 = resp2.read().decode("utf-8", errors="ignore")
+                    try:
+                        j2 = json.loads(body2)
+                        info = j2 if isinstance(j2, dict) else {"raw": body2}
+                    except Exception:
+                        info = {"raw": body2}
+                    ok = _check_valid(info, resp2.status)
+            except Exception as e_get:
+                info = {"error": f"license verify failed: {e_post} / {e_get}"}
+                ok = False
+    except Exception as exc:
+        info = {"error": str(exc)[:300]}
+        ok = False
+    with _LICENSE_CACHE_LOCK:
+        _LICENSE_CACHE[key] = (ok, now + LICENSE_CACHE_TTL, info)
+    return ok, info
 
 
 class TursoStore:
@@ -126,6 +220,16 @@ class TursoStore:
                     _run_async(self._aexec(sql))
                 except Exception:
                     pass
+        # Migration cho DB cũ thiếu owner columns
+        for mig in [
+            "ALTER TABLE jobs ADD COLUMN owner_hash TEXT DEFAULT ''",
+            "ALTER TABLE jobs ADD COLUMN owner_preview TEXT DEFAULT ''",
+            "CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash)",
+        ]:
+            try:
+                _run_async(self._aexec(mig))
+            except Exception:
+                pass
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
@@ -168,6 +272,20 @@ class LocalStore:
         with self._lock:
             self._conn.executescript(_SCHEMA)
             self._conn.commit()
+            # Migration cho DB cũ
+            for mig in [
+                "ALTER TABLE jobs ADD COLUMN owner_hash TEXT DEFAULT ''",
+                "ALTER TABLE jobs ADD COLUMN owner_preview TEXT DEFAULT ''",
+                "CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash)",
+            ]:
+                try:
+                    self._conn.execute(mig)
+                except Exception:
+                    pass
+            try:
+                self._conn.commit()
+            except Exception:
+                pass
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
@@ -290,7 +408,19 @@ tr:hover{background:#1c2128}
 <header>
   <h1>🎮 Garena Check Tool</h1>
   <span class="badge">MASTER</span>
+  <span id="ownerBadge" style="margin-left:auto;background:#1f6feb;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600"></span>
+  <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-left:8px" onclick="changeKey()">🔑 Đổi Key</button>
 </header>
+
+<div class="card" id="keyCard" style="border-color:#1f6feb">
+  <h2>🔐 License Key (f:license-server)</h2>
+  <p style="color:#8b949e;font-size:13px;margin-bottom:10px">Mỗi key chỉ xem được job của mình. Nhập key được cấp từ license-server. Vệ tinh vẫn dùng <code>MASTER_TOKEN</code> để claim mọi job.</p>
+  <div class="row">
+    <div class="field" style="flex:2"><label>License Key</label><input type="password" id="keyInput" placeholder="Nhập key..."></div>
+    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" onclick="saveKey()">✅ Lưu & Kiểm tra</button></div>
+  </div>
+  <div id="keyStatus" style="margin-top:10px;font-size:13px"></div>
+</div>
 
 <div class="card">
   <h2>📋 Gửi danh sách tài khoản</h2>
@@ -302,13 +432,14 @@ tr:hover{background:#1c2128}
 </div>
 
 <div class="card">
-  <h2>📊 Danh sách Jobs</h2>
+  <h2>📊 Danh sách Jobs của bạn</h2>
+  <p style="color:#8b949e;font-size:12px;margin-bottom:8px">Chỉ hiện job tạo bởi key hiện tại. Admin (MASTER_TOKEN) sẽ thấy tất cả.</p>
   <div style="margin-bottom:10px"><button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Refresh</button></div>
   <div id="jobsList" class="jobs-list"><div class="empty">Chưa có job nào</div></div>
 </div>
 
 <div class="card" id="detailCard" style="display:none">
-  <h2>📝 Chi tiết Job #<span id="detailJobId"></span></h2>
+  <h2>📝 Chi tiết Job #<span id="detailJobId"></span> <span id="detailOwner" style="font-size:12px;color:#8b949e"></span></h2>
   <div class="stats" id="detailStats"></div>
   <div style="margin:10px 0;display:flex;gap:8px">
     <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
@@ -321,14 +452,35 @@ tr:hover{background:#1c2128}
 <div id="toast"></div>
 
 <script>
-const TOKEN=localStorage.getItem('masterToken')||prompt('Nhập MASTER_TOKEN:','');
-if(TOKEN)localStorage.setItem('masterToken',TOKEN);
-const H={'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};
+let TOKEN=localStorage.getItem('licenseKey')||localStorage.getItem('masterToken')||'';
+if(!TOKEN){
+  TOKEN=prompt('Nhập License Key (key từ f:license-server):','')||'';
+  if(TOKEN) localStorage.setItem('licenseKey',TOKEN);
+}
+function getHeaders(){return {'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};}
+let H=getHeaders();
 let currentJobId=null;
 
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
 
-async function api(path,opt={}){const r=await fetch(path,{headers:H,...opt});return r.json()}
+async function api(path,opt={}){const r=await fetch(path,{headers:getHeaders(),...opt});const j=await r.json();if(r.status===401){toast('❌ Key không hợp lệ, vui lòng đổi key');}return j}
+
+function previewKey(k){if(!k) return '';if(k.length<=8) return k.slice(0,2)+'***'+k.slice(-1);return k.slice(0,4)+'***'+k.slice(-2);}
+function updateOwnerBadge(){const el=document.getElementById('ownerBadge');if(el) el.textContent=TOKEN?('Key: '+previewKey(TOKEN)):'Chưa có key';const inp=document.getElementById('keyInput');if(inp && !inp.value) inp.value=TOKEN;}
+function changeKey(){const k=prompt('Nhập License Key mới:','');if(k!==null){TOKEN=k.trim();localStorage.setItem('licenseKey',TOKEN);H=getHeaders();updateOwnerBadge();checkKey();loadJobs();toast('Đã đổi key');}}
+async function saveKey(){const inp=document.getElementById('keyInput');const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}TOKEN=k;localStorage.setItem('licenseKey',TOKEN);H=getHeaders();updateOwnerBadge();await checkKey();loadJobs();}
+async function checkKey(){
+  const st=document.getElementById('keyStatus');if(!st) return;
+  if(!TOKEN){st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return;}
+  st.innerHTML='Đang kiểm tra...';
+  try{
+    const r=await fetch('/api/verify?token='+encodeURIComponent(TOKEN),{headers:getHeaders()});
+    const j=await r.json();
+    if(j.valid||j.ok){st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';}
+    else{st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';}
+  }catch(e){st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
+}
+updateOwnerBadge();checkKey();
 
 async function sendJob(){
   const text=document.getElementById('accInput').value.trim();
@@ -406,21 +558,83 @@ class MasterHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *args: Any) -> None:
         return
 
-    def _authorized(self) -> bool:
-        token = self.server.master_token
-        if not token:
-            return True
+    def _extract_token(self) -> str:
+        # Ưu tiên Authorization Bearer, sau đó X-License-Key, cuối cùng query ?token=
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
-            return secrets.compare_digest(header[7:].strip(), token)
+            return header[7:].strip()
+        lk = self.headers.get("X-License-Key", "")
+        if lk:
+            return lk.strip()
         # Hỗ trợ token qua query string cho export CSV
         if "?" in self.path:
             from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             qt = qs.get("token", [""])[0]
-            if qt and secrets.compare_digest(qt, token):
-                return True
-        return False
+            if qt:
+                return qt.strip()
+            qk = qs.get("key", [""])[0]
+            if qk:
+                return qk.strip()
+        return ""
+
+    def _get_auth_info(self) -> dict[str, Any]:
+        """Trả về thông tin xác thực: {authorized, is_admin, is_satellite, owner_hash, owner_preview, token}"""
+        token = self._extract_token()
+        master_token = self.server.master_token or ""
+        # Nếu không đặt MASTER_TOKEN và không có LICENSE_SERVER_URL -> mở (dev)
+        license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+        if not master_token and not license_url:
+            # Dev mode: chấp nhận mọi token, nếu không có token thì owner rỗng (legacy)
+            if not token:
+                return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "", "token": ""}
+            # Nếu có token, coi như owner riêng
+            return {"authorized": True, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token}
+        # Nếu token khớp MASTER_TOKEN -> admin / satellite
+        if master_token and token and secrets.compare_digest(token, master_token):
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "admin", "token": token}
+        # Nếu token không khớp MASTER_TOKEN, thử verify như license key
+        if token:
+            ok, info = _verify_license_key(token)
+            if ok:
+                return {"authorized": True, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token, "license_info": info}
+            # Nếu master_token rỗng nhưng verify fail -> vẫn cho satellite claim với MASTER_TOKEN? Đã check ở trên
+            # Nếu verify fail, unauthorized
+            return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": token, "license_info": info}
+        # Không có token
+        return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": ""}
+
+    def _authorized(self) -> bool:
+        return self._get_auth_info().get("authorized", False)
+
+    def _require_user(self) -> dict[str, Any] | None:
+        """Kiểm tra auth cho endpoint của user (job). Trả về auth_info nếu ok, else gửi 401 và return None"""
+        info = self._get_auth_info()
+        if not info.get("authorized"):
+            # Nếu không có token mà server đang mở (không master_token, không license) thì cho qua
+            master_token = self.server.master_token or ""
+            license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+            if not master_token and not license_url:
+                return {"authorized": True, "is_admin": True, "owner_hash": "", "owner_preview": ""}
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "license key không hợp lệ hoặc thiếu. Vui lòng nhập key từ f:license-server"})
+            return None
+        return info
+
+    def _require_satellite(self) -> dict[str, Any] | None:
+        """Kiểm tra auth cho endpoint vệ tinh (claim/report/release). Chỉ chấp nhận MASTER_TOKEN hoặc license key hợp lệ nếu không có master_token"""
+        info = self._get_auth_info()
+        master_token = self.server.master_token or ""
+        license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+        # Nếu không đặt gì -> mở
+        if not master_token and not license_url:
+            return {"authorized": True, "is_admin": True, "owner_hash": "", "owner_preview": ""}
+        if info.get("is_admin") or info.get("is_satellite"):
+            return info
+        # Nếu có license server và key hợp lệ, cũng cho phép claim/report? Để vệ tinh có thể dùng license key nếu muốn
+        if info.get("authorized"):
+            return info
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ"})
+        return None
 
     def _security_headers(self, content_type: str) -> None:
         self.send_header("Content-Type", content_type)
@@ -487,14 +701,27 @@ class MasterHandler(BaseHTTPRequestHandler):
         if path == "/healthz":
             self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
             return
+        if path == "/api/verify":
+            # Endpoint để frontend kiểm tra license key: ?key=xxx hoặc Authorization Bearer
+            tok = self._extract_token()
+            if not tok:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+                return
+            ok, info = _verify_license_key(tok)
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
+            else:
+                self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
+            return
         if path == "/" or path == "/index.html":
             self._html(_PAGE_HTML)
             return
-        if not self._authorized():
-            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token kh\u00f4ng h\u1ee3p l\u1ec7"})
+        # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
+        auth = self._require_user()
+        if auth is None:
             return
         if path == "/api/jobs_list":
-            self._handle_jobs_list()
+            self._handle_jobs_list(auth)
             return
         parts = path.strip("/").split("/")
         if len(parts) == 3 and parts[0] == "api" and parts[1] == "jobs":
@@ -502,21 +729,21 @@ class MasterHandler(BaseHTTPRequestHandler):
             if job_id is None:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
                 return
-            self._handle_job_summary(job_id)
+            self._handle_job_summary(job_id, auth)
             return
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "rows":
             job_id = self._int_or_none(parts[2])
             if job_id is None:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
                 return
-            self._handle_job_rows(job_id)
+            self._handle_job_rows(job_id, auth)
             return
         if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "export.csv":
             job_id = self._int_or_none(parts[2])
             if job_id is None:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
                 return
-            self._handle_job_export(job_id)
+            self._handle_job_export(job_id, auth)
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
 
@@ -529,30 +756,66 @@ class MasterHandler(BaseHTTPRequestHandler):
         return number
 
     def do_POST(self) -> None:
-        if not self._authorized():
-            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token không hợp lệ"})
-            return
+        # Phân biệt endpoint user vs vệ tinh
         if self.path == "/api/jobs":
-            self._handle_create_job()
+            auth = self._require_user()
+            if auth is None:
+                return
+            self._handle_create_job(auth)
             return
         if self.path == "/api/claim":
+            auth = self._require_satellite()
+            if auth is None:
+                return
             self._handle_claim()
             return
         if self.path == "/api/report":
+            auth = self._require_satellite()
+            if auth is None:
+                return
             self._handle_report()
             return
         if self.path == "/api/chunk/release":
+            auth = self._require_satellite()
+            if auth is None:
+                return
             self._handle_release()
+            return
+        if self.path == "/api/verify":
+            tok = self._extract_token()
+            if not tok:
+                try:
+                    body = self._read_json()
+                    tok = str(body.get("key") or body.get("token") or "")
+                except Exception:
+                    tok = ""
+            if not tok:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+                return
+            ok, info = _verify_license_key(tok)
+            if ok:
+                self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
+            else:
+                self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
             return
         self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
 
     # --- handlers -----------------------------------------------------
 
-    def _handle_jobs_list(self) -> None:
+    def _handle_jobs_list(self, auth: dict[str, Any] | None = None) -> None:
         store = self.server.store
-        jobs_raw = store.fetch(
-            "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs ORDER BY id DESC LIMIT 50"
-        )
+        owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
+        is_admin = bool((auth or {}).get("is_admin"))
+        # Nếu admin (MASTER_TOKEN) hoặc owner rỗng (legacy/dev) thì xem tất cả
+        if is_admin or not owner_hash:
+            jobs_raw = store.fetch(
+                "SELECT id, created_at, total, chunk_size, status, finished_at, owner_preview FROM jobs ORDER BY id DESC LIMIT 50"
+            )
+        else:
+            jobs_raw = store.fetch(
+                "SELECT id, created_at, total, chunk_size, status, finished_at, owner_preview FROM jobs WHERE owner_hash=? ORDER BY id DESC LIMIT 50",
+                (owner_hash,),
+            )
         jobs = []
         for row in jobs_raw:
             job_id = row[0]
@@ -569,10 +832,11 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "status": row[4],
                 "ok": ok_count,
                 "fail": results_count - ok_count,
+                "owner_preview": row[6] if len(row) > 6 else "",
             })
         self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs})
 
-    def _handle_create_job(self) -> None:
+    def _handle_create_job(self, auth: dict[str, Any] | None = None) -> None:
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -601,9 +865,11 @@ class MasterHandler(BaseHTTPRequestHandler):
         chunk_size = max(1, min(chunk_size, MAX_CHUNK_LIMIT))
 
         store = self.server.store
+        owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
+        owner_preview = (auth or {}).get("owner_preview", "") if auth else ""
         job_id = store.exec(
-            "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
-            (_now(), len(parsed), chunk_size, "open"),
+            "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+            (_now(), len(parsed), chunk_size, "open", owner_hash, owner_preview),
         )
         chunks = split_chunks(parsed, chunk_size)
         stmts = []
@@ -794,14 +1060,38 @@ class MasterHandler(BaseHTTPRequestHandler):
                     (now, job_id),
                 )
 
-    def _handle_job_summary(self, job_id: int) -> None:
+    def _check_job_access(self, job_id: int, auth: dict[str, Any] | None) -> tuple[bool, tuple | None]:
+        """Kiểm tra job có thuộc owner không. Trả về (allowed, job_row). Admin được xem tất cả."""
         store = self.server.store
         job = store.fetchone(
-            "SELECT id, created_at, total, chunk_size, status, finished_at FROM jobs WHERE id=?",
+            "SELECT id, created_at, total, chunk_size, status, finished_at, owner_hash, owner_preview FROM jobs WHERE id=?",
             (job_id,),
         )
         if job is None:
+            return False, None
+        # Nếu job cũ không có owner (legacy) thì chỉ admin mới xem được, user thường không thấy
+        job_owner = job[6] or ""
+        auth_owner = (auth or {}).get("owner_hash", "") if auth else ""
+        is_admin = bool((auth or {}).get("is_admin"))
+        if is_admin or not job_owner:
+            # Admin xem tất cả, legacy job (owner rỗng) cho admin hoặc khi dev mode không filter
+            # Nếu dev mode (không license, không master_token) thì owner rỗng -> cho qua
+            if not is_admin and job_owner == "" and auth_owner != "":
+                # User thường không được xem job legacy của người khác
+                return False, job
+            return True, job
+        if job_owner == auth_owner:
+            return True, job
+        return False, job
+
+    def _handle_job_summary(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
+        store = self.server.store
+        allowed, job = self._check_job_access(job_id, auth)
+        if job is None:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        if not allowed:
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền xem job này (key khác)"})
             return
         pending = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='pending'", (job_id,)) or [0])[0]
         claimed = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='claimed'", (job_id,)) or [0])[0]
@@ -820,11 +1110,19 @@ class MasterHandler(BaseHTTPRequestHandler):
             "chunk_size": job[3],
             "status": job[4],
             "finished_at": job[5],
+            "owner_preview": job[7] if len(job) > 7 else "",
             "chunks": {"pending": pending, "claimed": claimed, "done": done},
             "results": {"count": results_count, "ok": ok_count, "fail": results_count - ok_count},
         })
 
-    def _handle_job_rows(self, job_id: int) -> None:
+    def _handle_job_rows(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
+        allowed, job = self._check_job_access(job_id, auth)
+        if job is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        if not allowed:
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền xem job này"})
+            return
         store = self.server.store
         rows_raw = store.fetch(
             "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
@@ -832,7 +1130,14 @@ class MasterHandler(BaseHTTPRequestHandler):
         rows = [json.loads(item[0]) for item in rows_raw]
         self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "rows": rows})
 
-    def _handle_job_export(self, job_id: int) -> None:
+    def _handle_job_export(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
+        allowed, job = self._check_job_access(job_id, auth)
+        if job is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        if not allowed:
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền export job này"})
+            return
         store = self.server.store
         rows_raw = store.fetch(
             "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
