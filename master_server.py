@@ -639,6 +639,8 @@ if(!TOKEN){
 function getHeaders(){return {'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};}
 let H=getHeaders();
 let currentJobId=null;
+let detailPage=1;
+const DETAIL_PAGE_SIZE=50;
 
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
 
@@ -698,6 +700,7 @@ async function loadJobs(){
 
 async function viewJob(id){
   currentJobId=id;
+  detailPage=1;
   document.getElementById('detailCard').style.display='block';
   document.getElementById('detailJobId').textContent=id;
   refreshDetail();
@@ -717,7 +720,7 @@ async function refreshDetail(){
       '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
       '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
 
-    const rd=await api('/api/jobs/'+id+'/rows');
+    const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
     if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
     let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Thời gian</th></tr>';
     rd.rows.forEach(r=>{
@@ -725,10 +728,19 @@ async function refreshDetail(){
       h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
       h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+r.elapsed_ms+'ms</td></tr>'
     });
-    document.getElementById('detailRows').innerHTML=h+'</table>';
+    const totalPages=rd.total_pages||1;
+    h+='</table>';
+    if(totalPages>1){
+      h+='<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px">'+
+        '<button class="btn btn-sm btn-primary" '+(rd.page<=1?'disabled':'')+' onclick="goDetailPage('+(rd.page-1)+')">← Trước</button>'+
+        '<span style="font-size:12px;color:#8b949e">Trang '+rd.page+'/'+totalPages+' · '+rd.total+' kết quả</span>'+
+        '<button class="btn btn-sm btn-primary" '+(rd.page>=totalPages?'disabled':'')+' onclick="goDetailPage('+(rd.page+1)+')">Sau →</button></div>';
+    }
+    document.getElementById('detailRows').innerHTML=h;
     if(s.status!=='done')setTimeout(refreshDetail,5000)
   }catch(e){document.getElementById('detailRows').innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
 }
+function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
 
 function exportCsv(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.csv?token='+TOKEN)}
 
@@ -1209,7 +1221,6 @@ class MasterHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, {"ok": True, "claim": None})
 
     def _handle_report(self) -> None:
-        started = time.perf_counter()
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -1225,7 +1236,6 @@ class MasterHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "cần mảng rows"})
             return
         is_done = bool(body.get("done", True))
-        satellite_id = str(body.get("satellite_id") or "unknown")
 
         store = self.server.store
         now = _now()
@@ -1273,20 +1283,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 print(f"[master] chunk {chunk_id} skipped_empty {skipped_empty}/{len(rows)}", flush=True)
         if is_done:
             self._check_finish_all_jobs(now)
-        master_elapsed_ms = (time.perf_counter() - started) * 1000
-        print(
-            f"[master] report chunk={chunk_id} satellite={satellite_id} rows={len(rows)} "
-            f"done={is_done} processed={master_elapsed_ms:.1f}ms",
-            flush=True,
-        )
-        self._json(HTTPStatus.OK, {
-            "ok": True,
-            "chunk_id": chunk_id,
-            "rows": len(rows),
-            "done": is_done,
-            "expected": expected_count,
-            "master_elapsed_ms": round(master_elapsed_ms, 1),
-        })
+        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done, "expected": expected_count})
 
     def _handle_release(self) -> None:
         try:
@@ -1385,11 +1382,36 @@ class MasterHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền xem job này"})
             return
         store = self.server.store
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            page = max(1, int(query.get("page", ["1"])[0]))
+        except (TypeError, ValueError):
+            page = 1
+        try:
+            per_page = int(query.get("per_page", ["50"])[0])
+        except (TypeError, ValueError):
+            per_page = 50
+        # Giới hạn kích thước trang để một request chi tiết không tải quá nhiều dữ liệu.
+        per_page = max(1, min(per_page, 100))
+        total_row = store.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))
+        total = int(total_row[0]) if total_row else 0
+        total_pages = max(1, (total + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        offset = (page - 1) * per_page
         rows_raw = store.fetch(
-            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+            "SELECT row_json FROM results WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
+            (job_id, per_page, offset),
         )
         rows = [json.loads(item[0]) for item in rows_raw]
-        self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "rows": rows})
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "job_id": job_id,
+            "rows": rows,
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": total_pages,
+        })
 
     def _handle_job_export(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
         allowed, job = self._check_job_access(job_id, auth)

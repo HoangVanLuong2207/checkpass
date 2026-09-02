@@ -38,9 +38,6 @@ TIMEOUT = float(_env("TIMEOUT", "20.0") or "20.0")
 LEASE_MINUTES = float(_env("LEASE_MINUTES", "60") or "60")
 CONCURRENT_CHUNKS = int(_env("CONCURRENT_CHUNKS", "3") or "3")
 POLL_INTERVAL = float(_env("POLL_INTERVAL", "15") or "15")
-# In thời gian của mỗi lần gọi master khi vượt ngưỡng này. Report luôn được in
-# để có thể đối chiếu với thời gian xử lý phía master.
-MASTER_REQUEST_WARN_SECONDS = float(_env("MASTER_REQUEST_WARN_SECONDS", "2.0") or "2.0")
 # Render Web Service truyền PORT; fallback HEALTH_PORT cho local
 HEALTH_PORT = int(_env("PORT", "") or _env("HEALTH_PORT", "8765") or "8765")
 HEALTH_HOST = _env("HEALTH_HOST", "0.0.0.0") or "0.0.0.0"
@@ -57,18 +54,9 @@ class _Client:
         request = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET")
         request.add_header("Content-Type", "application/json")
         request.add_header("Authorization", f"Bearer {self.token}")
-        started = time.perf_counter()
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            # master_elapsed_ms là thời gian master xử lý request; phần chênh
-            # lệch còn lại là upload/download + độ trễ mạng/proxy.
-            server_elapsed_ms = payload.get("master_elapsed_ms")
-            if path == "/api/report" or elapsed_ms >= MASTER_REQUEST_WARN_SECONDS * 1000:
-                detail = f", master={server_elapsed_ms:.1f}ms" if isinstance(server_elapsed_ms, (int, float)) else ""
-                print(f"[satellite] master {path}: round-trip={elapsed_ms:.1f}ms{detail}", flush=True)
-            return payload
+                return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             try:
                 payload = json.loads(exc.read().decode("utf-8"))
@@ -85,12 +73,7 @@ class _Client:
         })
 
     def report(self, chunk_id: int, rows: list[dict], done: bool = True) -> dict:
-        return self._request("/api/report", {
-            "chunk_id": chunk_id,
-            "satellite_id": SATELLITE_ID,
-            "rows": rows,
-            "done": done,
-        })
+        return self._request("/api/report", {"chunk_id": chunk_id, "rows": rows, "done": done})
 
     def release(self, chunk_id: int) -> dict:
         return self._request("/api/chunk/release", {
@@ -233,8 +216,7 @@ def _worker_loop() -> None:
     print(
         f"[satellite] {SATELLITE_ID} khởi động: master={MASTER_URL} "
         f"workers={WORKERS} concurrent_chunks={CONCURRENT_CHUNKS} "
-        f"gap={START_GAP:g}s timeout={TIMEOUT:g}s "
-        f"master_warn={MASTER_REQUEST_WARN_SECONDS:g}s",
+        f"gap={START_GAP:g}s timeout={TIMEOUT:g}s",
         flush=True,
     )
 
