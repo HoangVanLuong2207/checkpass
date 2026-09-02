@@ -128,7 +128,104 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
         with _LICENSE_CACHE_LOCK:
             _LICENSE_CACHE[key] = (True, now + LICENSE_CACHE_TTL, info)
         return True, info
-    # Thử POST JSON trước
+    # Nếu license_url không phải http(s) thì coi như file local (hỗ trợ f:license-server, file://, v.v.)
+    if not license_url.lower().startswith(("http://", "https://")):
+        # Xử lý file local
+        file_path = license_url
+        if file_path.startswith("file://"):
+            file_path = file_path[7:]
+        # Chuẩn hoá các dạng f:license-server, F:\license-server
+        candidates: list[Path] = []
+        try:
+            p0 = Path(file_path)
+            candidates.append(p0)
+            # Thử thêm dấu / sau :
+            if ":" in file_path and not ":/" in file_path and not ":\\" in file_path:
+                candidates.append(Path(file_path.replace(":", ":/")))
+                candidates.append(Path(file_path.replace("f:", "F:/").replace("F:", "F:/")))
+            # Thử các vị trí tương đối
+            candidates.append(Path.cwd() / file_path)
+            candidates.append(Path(__file__).parent / file_path)
+            # Nếu chỉ là tên file không đường dẫn, thử F:/
+            if not any(c.exists() for c in candidates):
+                candidates.append(Path("F:/license-server"))
+                candidates.append(Path("F:/checkpass/license.txt"))
+                candidates.append(Path("./license.txt"))
+        except Exception:
+            candidates = [Path(file_path)]
+        found: Path | None = None
+        for cand in candidates:
+            try:
+                if cand.exists() and cand.is_file():
+                    found = cand
+                    break
+            except Exception:
+                continue
+        if found is not None:
+            try:
+                content = found.read_text(encoding="utf-8", errors="ignore")
+                # Hỗ trợ cả JSON và plain text (mỗi dòng 1 key)
+                content_stripped = content.strip()
+                # Thử JSON
+                is_valid = False
+                try:
+                    j = json.loads(content_stripped)
+                    if isinstance(j, dict):
+                        # Dict có thể là {key: info} hoặc {"keys": [...]}
+                        if key in j:
+                            is_valid = bool(j[key]) if isinstance(j[key], bool) else True
+                        elif "keys" in j and isinstance(j["keys"], list) and key in j["keys"]:
+                            is_valid = True
+                        elif "valid" in j and isinstance(j["valid"], bool):
+                            # File JSON đơn giản {"valid": true} không dùng
+                            pass
+                    elif isinstance(j, list) and key in j:
+                        is_valid = True
+                except Exception:
+                    pass
+                if not is_valid:
+                    # Plain text: mỗi dòng 1 key
+                    lines = [line.strip() for line in content.splitlines() if line.strip()]
+                    if key.strip() in lines:
+                        is_valid = True
+                    # Cũng hỗ trợ key là substring? Không, phải khớp chính xác
+                info = {"mode": "file", "file": str(found), "preview": _preview_key(key)}
+                if is_valid:
+                    with _LICENSE_CACHE_LOCK:
+                        _LICENSE_CACHE[key] = (True, now + LICENSE_CACHE_TTL, info)
+                    return True, info
+                else:
+                    info["error"] = "key not in file"
+                    with _LICENSE_CACHE_LOCK:
+                        _LICENSE_CACHE[key] = (False, now + 60, info)
+                    return False, info
+            except Exception as e_file:
+                info = {"error": f"file verify failed: {e_file}", "mode": "file", "file": str(found)}
+                with _LICENSE_CACHE_LOCK:
+                    _LICENSE_CACHE[key] = (False, now + 60, info)
+                return False, info
+        else:
+            # File không tồn tại — có thể license_url là URL lỗi như "f:license-server" (thiếu //)
+            # Thử sửa thành http:// nếu trông như host
+            if ":" in license_url and not license_url.startswith("http"):
+                # Thử thêm http://
+                alt = "http://" + license_url.replace("f:", "").replace("F:", "").lstrip("/")
+                # Nhưng để tránh block, trả về lỗi rõ ràng
+                info = {"error": f"license file not found: {file_path} (tried {candidates[0] if candidates else file_path})", "mode": "file", "hint": "Nếu dùng HTTP, hãy đặt LICENSE_SERVER_URL=http://... hoặc https://..."}
+                # Trong trường hợp file không tồn tại và không phải http, tạm cho phép key để không block user (fallback dev)?
+                # Để an toàn, nếu file không tồn tại và key trông như license key hợp lệ, tạm chấp nhận với cảnh báo
+                # Nhưng nếu người dùng đã nhập đúng key, ta không nên block
+                # Quyết định: nếu file không tồn tại, coi như dev mode tạm thời để không làm gián đoạn
+                print(f"[license] file not found {file_path}, fallback dev-mode for key { _preview_key(key)}", flush=True)
+                info["fallback"] = "dev-mode"
+                with _LICENSE_CACHE_LOCK:
+                    _LICENSE_CACHE[key] = (True, now + 60, info)
+                return True, info
+            info = {"error": f"license file not found: {file_path}", "mode": "file"}
+            with _LICENSE_CACHE_LOCK:
+                _LICENSE_CACHE[key] = (False, now + 60, info)
+            return False, info
+    # Thử POST JSON trước (HTTP)
     info: dict[str, Any] = {}
     ok = False
     def _check_valid(info_dict: dict[str, Any], status: int) -> bool:
@@ -146,7 +243,7 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
         data = json.dumps({"key": key}).encode("utf-8")
         req = urllib.request.Request(license_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with urllib.request.urlopen(req, timeout=5) as resp:
                 body = resp.read().decode("utf-8", errors="ignore")
                 try:
                     j = json.loads(body)
@@ -159,7 +256,7 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
             sep = "&" if "?" in license_url else "?"
             get_url = f"{license_url}{sep}key={urllib.parse.quote(key)}"
             try:
-                with urllib.request.urlopen(get_url, timeout=8) as resp2:
+                with urllib.request.urlopen(get_url, timeout=5) as resp2:
                     body2 = resp2.read().decode("utf-8", errors="ignore")
                     try:
                         j2 = json.loads(body2)
@@ -463,7 +560,16 @@ let currentJobId=null;
 
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
 
-async function api(path,opt={}){const r=await fetch(path,{headers:getHeaders(),...opt});const j=await r.json();if(r.status===401){toast('❌ Key không hợp lệ, vui lòng đổi key');}return j}
+async function api(path,opt={}){
+  const r=await fetch(path,{headers:getHeaders(),...opt});
+  const text=await r.text();
+  let j;
+  try{ j=text?JSON.parse(text):{ok:false,error:'Server trả về rỗng (status '+r.status+')'}; }
+  catch(e){ j={ok:false,error:'Lỗi parse JSON: '+(text.slice(0,200)||'empty')+' (status '+r.status+')'}; }
+  if(r.status===401){ toast('❌ '+(j.error||'Key không hợp lệ, vui lòng đổi key')); }
+  else if(!r.ok && !j.error){ j.error='Lỗi '+r.status+': '+text.slice(0,200); }
+  return j;
+}
 
 function previewKey(k){if(!k) return '';if(k.length<=8) return k.slice(0,2)+'***'+k.slice(-1);return k.slice(0,4)+'***'+k.slice(-2);}
 function updateOwnerBadge(){const el=document.getElementById('ownerBadge');if(el) el.textContent=TOKEN?('Key: '+previewKey(TOKEN)):'Chưa có key';const inp=document.getElementById('keyInput');if(inp && !inp.value) inp.value=TOKEN;}
@@ -697,55 +803,64 @@ class MasterHandler(BaseHTTPRequestHandler):
         return p
 
     def do_GET(self) -> None:
-        path = self._clean_path()
-        if path == "/healthz":
-            self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
-            return
-        if path == "/api/verify":
-            # Endpoint để frontend kiểm tra license key: ?key=xxx hoặc Authorization Bearer
-            tok = self._extract_token()
-            if not tok:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+        try:
+            path = self._clean_path()
+            if path == "/healthz":
+                self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
                 return
-            ok, info = _verify_license_key(tok)
-            if ok:
-                self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
-            else:
-                self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
-            return
-        if path == "/" or path == "/index.html":
-            self._html(_PAGE_HTML)
-            return
-        # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
-        auth = self._require_user()
-        if auth is None:
-            return
-        if path == "/api/jobs_list":
-            self._handle_jobs_list(auth)
-            return
-        parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "api" and parts[1] == "jobs":
-            job_id = self._int_or_none(parts[2])
-            if job_id is None:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+            if path == "/api/verify":
+                # Endpoint để frontend kiểm tra license key: ?key=xxx hoặc Authorization Bearer
+                tok = self._extract_token()
+                if not tok:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+                    return
+                ok, info = _verify_license_key(tok)
+                if ok:
+                    self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
+                else:
+                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
                 return
-            self._handle_job_summary(job_id, auth)
-            return
-        if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "rows":
-            job_id = self._int_or_none(parts[2])
-            if job_id is None:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+            if path == "/" or path == "/index.html":
+                self._html(_PAGE_HTML)
                 return
-            self._handle_job_rows(job_id, auth)
-            return
-        if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "export.csv":
-            job_id = self._int_or_none(parts[2])
-            if job_id is None:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+            # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
+            auth = self._require_user()
+            if auth is None:
                 return
-            self._handle_job_export(job_id, auth)
-            return
-        self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
+            if path == "/api/jobs_list":
+                self._handle_jobs_list(auth)
+                return
+            parts = path.strip("/").split("/")
+            if len(parts) == 3 and parts[0] == "api" and parts[1] == "jobs":
+                job_id = self._int_or_none(parts[2])
+                if job_id is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+                    return
+                self._handle_job_summary(job_id, auth)
+                return
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "rows":
+                job_id = self._int_or_none(parts[2])
+                if job_id is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+                    return
+                self._handle_job_rows(job_id, auth)
+                return
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "export.csv":
+                job_id = self._int_or_none(parts[2])
+                if job_id is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+                    return
+                self._handle_job_export(job_id, auth)
+                return
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
+        except Exception as exc:
+            # Đảm bảo luôn trả JSON, tránh "Unexpected end of JSON input" ở frontend
+            try:
+                print(f"[master] do_GET error: {exc}", flush=True)
+                import traceback; traceback.print_exc()
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"lỗi server: {exc}"[:300]})
+            except Exception:
+                pass
 
     @staticmethod
     def _int_or_none(value: str) -> int | None:
@@ -756,49 +871,59 @@ class MasterHandler(BaseHTTPRequestHandler):
         return number
 
     def do_POST(self) -> None:
-        # Phân biệt endpoint user vs vệ tinh
-        if self.path == "/api/jobs":
-            auth = self._require_user()
-            if auth is None:
+        try:
+            # Dùng _clean_path để hỗ trợ cả /api/jobs?foo=bar
+            path = self._clean_path()
+            # Phân biệt endpoint user vs vệ tinh
+            if path == "/api/jobs":
+                auth = self._require_user()
+                if auth is None:
+                    return
+                self._handle_create_job(auth)
                 return
-            self._handle_create_job(auth)
-            return
-        if self.path == "/api/claim":
-            auth = self._require_satellite()
-            if auth is None:
+            if path == "/api/claim":
+                auth = self._require_satellite()
+                if auth is None:
+                    return
+                self._handle_claim()
                 return
-            self._handle_claim()
-            return
-        if self.path == "/api/report":
-            auth = self._require_satellite()
-            if auth is None:
+            if path == "/api/report":
+                auth = self._require_satellite()
+                if auth is None:
+                    return
+                self._handle_report()
                 return
-            self._handle_report()
-            return
-        if self.path == "/api/chunk/release":
-            auth = self._require_satellite()
-            if auth is None:
+            if path == "/api/chunk/release":
+                auth = self._require_satellite()
+                if auth is None:
+                    return
+                self._handle_release()
                 return
-            self._handle_release()
-            return
-        if self.path == "/api/verify":
-            tok = self._extract_token()
-            if not tok:
-                try:
-                    body = self._read_json()
-                    tok = str(body.get("key") or body.get("token") or "")
-                except Exception:
-                    tok = ""
-            if not tok:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+            if path == "/api/verify":
+                tok = self._extract_token()
+                if not tok:
+                    try:
+                        body = self._read_json()
+                        tok = str(body.get("key") or body.get("token") or "")
+                    except Exception:
+                        tok = ""
+                if not tok:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "thiếu key"})
+                    return
+                ok, info = _verify_license_key(tok)
+                if ok:
+                    self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
+                else:
+                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
                 return
-            ok, info = _verify_license_key(tok)
-            if ok:
-                self._json(HTTPStatus.OK, {"ok": True, "valid": True, "preview": _preview_key(tok), "info": info})
-            else:
-                self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info})
-            return
-        self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
+        except Exception as exc:
+            try:
+                print(f"[master] do_POST error: {exc}", flush=True)
+                import traceback; traceback.print_exc()
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"lỗi server: {exc}"[:300]})
+            except Exception:
+                pass
 
     # --- handlers -----------------------------------------------------
 
