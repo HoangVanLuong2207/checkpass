@@ -27,8 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-DEFAULT_CHUNK_LIMIT = 1000
-MAX_CHUNK_LIMIT = 1000
+DEFAULT_CHUNK_LIMIT = 15
+# Chunk được cố định để tránh client thay đổi kích thước qua API.
+MAX_CHUNK_LIMIT = 15
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 60
 MAX_BODY = 32 * 1024 * 1024
@@ -605,7 +606,6 @@ tr:hover{background:#1c2128}
   <h2>📋 Gửi danh sách tài khoản</h2>
   <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass  hoặc  user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
   <div class="row" style="margin-top:12px">
-    <div class="field"><label>Chunk size</label><input type="number" id="chunkSize" value="100" min="1" max="1000"></div>
     <div class="field"><label>&nbsp;</label><button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button></div>
   </div>
 </div>
@@ -675,8 +675,7 @@ async function sendJob(){
   if(!text){toast('Nhập danh sách tài khoản!');return}
   const btn=document.getElementById('btnSend');btn.disabled=true;btn.textContent='⏳ Đang gửi...';
   try{
-    const chunk_size=parseInt(document.getElementById('chunkSize').value)||100;
-    const d=await api('/api/jobs',{method:'POST',body:JSON.stringify({text,chunk_size})});
+    const d=await api('/api/jobs',{method:'POST',body:JSON.stringify({text})});
     if(d.ok){toast('✅ Tạo Job #'+d.job_id+' ('+d.total+' acc)');document.getElementById('accInput').value='';loadJobs();viewJob(d.job_id)}
     else toast('❌ '+d.error)
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;btn.textContent='🚀 Gửi check'}
@@ -1099,11 +1098,8 @@ class MasterHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
             return
-        try:
-            chunk_size = int(body.get("chunk_size", DEFAULT_CHUNK_LIMIT))
-        except (TypeError, ValueError):
-            chunk_size = DEFAULT_CHUNK_LIMIT
-        chunk_size = max(1, min(chunk_size, MAX_CHUNK_LIMIT))
+        # Cố định 15 account/chunk; không nhận cấu hình từ client.
+        chunk_size = DEFAULT_CHUNK_LIMIT
 
         store = self.server.store
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
@@ -1213,6 +1209,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.OK, {"ok": True, "claim": None})
 
     def _handle_report(self) -> None:
+        started = time.perf_counter()
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -1228,6 +1225,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "cần mảng rows"})
             return
         is_done = bool(body.get("done", True))
+        satellite_id = str(body.get("satellite_id") or "unknown")
 
         store = self.server.store
         now = _now()
@@ -1275,7 +1273,20 @@ class MasterHandler(BaseHTTPRequestHandler):
                 print(f"[master] chunk {chunk_id} skipped_empty {skipped_empty}/{len(rows)}", flush=True)
         if is_done:
             self._check_finish_all_jobs(now)
-        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done, "expected": expected_count})
+        master_elapsed_ms = (time.perf_counter() - started) * 1000
+        print(
+            f"[master] report chunk={chunk_id} satellite={satellite_id} rows={len(rows)} "
+            f"done={is_done} processed={master_elapsed_ms:.1f}ms",
+            flush=True,
+        )
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "chunk_id": chunk_id,
+            "rows": len(rows),
+            "done": is_done,
+            "expected": expected_count,
+            "master_elapsed_ms": round(master_elapsed_ms, 1),
+        })
 
     def _handle_release(self) -> None:
         try:
