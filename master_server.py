@@ -225,7 +225,7 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
             with _LICENSE_CACHE_LOCK:
                 _LICENSE_CACHE[key] = (False, now + 60, info)
             return False, info
-    # Thử POST JSON trước (HTTP)
+    # Thử HTTP verify — hỗ trợ cả master-verify (đơn giản) và verify cũ (cần hwid/nonce)
     info: dict[str, Any] = {}
     ok = False
     def _check_valid(info_dict: dict[str, Any], status: int) -> bool:
@@ -239,25 +239,59 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
             return bool(info_dict["active"])
         # Fallback: nếu không có flag explicit và status 200 và không có error thì coi như valid
         return status == 200 and not info_dict.get("error")
+    # Chuẩn hoá base URL
+    base = license_url.rstrip("/")
+    # Nếu base đã chứa /api/verify hoặc /api/master-verify thì dùng trực tiếp, else thử các endpoint
+    candidates: list[tuple[str, dict[str, Any] | None]] = []
+    if "/api/" in base:
+        # Đã chỉ rõ endpoint
+        candidates.append((base, {"key": key}))
+    else:
+        # Thử master-verify trước (đơn giản, không cần hwid)
+        candidates.append((base + "/api/master-verify", {"key": key}))
+        candidates.append((base + "/api/verify-simple", {"key": key}))
+        candidates.append((base + "/api/check", {"key": key}))
+        # Cuối cùng thử verify cũ với hwid/nonce giả
+        candidates.append((base + "/api/verify", {"key": key, "hwid": "master-server-verify", "nonce": secrets.token_hex(16)}))
+    # Thêm fallback GET
+    tried_errors: list[str] = []
     try:
-        data = json.dumps({"key": key}).encode("utf-8")
-        req = urllib.request.Request(license_url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                body = resp.read().decode("utf-8", errors="ignore")
-                try:
-                    j = json.loads(body)
-                    info = j if isinstance(j, dict) else {"raw": body}
-                except Exception:
-                    info = {"raw": body}
-                ok = _check_valid(info, resp.status)
-        except Exception as e_post:
-            # Fallback GET ?key=
-            sep = "&" if "?" in license_url else "?"
-            get_url = f"{license_url}{sep}key={urllib.parse.quote(key)}"
+        for verify_url, payload in candidates:
+            try:
+                data = json.dumps(payload).encode("utf-8") if payload else b""
+                headers = {"Content-Type": "application/json"} if payload else {}
+                req = urllib.request.Request(verify_url, data=data if payload else None, headers=headers, method="POST" if payload else "GET")
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    body = resp.read().decode("utf-8", errors="ignore")
+                    # Nếu body là HTML (admin panel) thì không phải JSON verify, bỏ qua
+                    if body.strip().startswith("<!DOCTYPE") or body.strip().startswith("<html"):
+                        tried_errors.append(f"{verify_url} returned HTML")
+                        continue
+                    try:
+                        j = json.loads(body)
+                        info = j if isinstance(j, dict) else {"raw": body}
+                    except Exception:
+                        info = {"raw": body}
+                    # Nếu info có valid flag thì dùng, else tiếp tục thử endpoint khác nếu body là HTML
+                    if "valid" in info or "ok" in info or "success" in info or "active" in info or "error" in info:
+                        ok = _check_valid(info, resp.status)
+                        break
+                    else:
+                        # Không có flag, thử endpoint tiếp
+                        tried_errors.append(f"{verify_url} no valid flag: {body[:100]}")
+                        continue
+            except Exception as e:
+                tried_errors.append(f"{verify_url}: {e}")
+                continue
+        else:
+            # Tất cả POST fail, thử GET fallback
+            sep = "&" if "?" in base else "?"
+            get_url = f"{base}/api/master-verify?key={urllib.parse.quote(key)}" if "/api/" not in base else f"{base}{sep}key={urllib.parse.quote(key)}"
             try:
                 with urllib.request.urlopen(get_url, timeout=5) as resp2:
                     body2 = resp2.read().decode("utf-8", errors="ignore")
+                    if body2.strip().startswith("<!DOCTYPE") or body2.strip().startswith("<html"):
+                        raise ValueError("GET returned HTML")
                     try:
                         j2 = json.loads(body2)
                         info = j2 if isinstance(j2, dict) else {"raw": body2}
@@ -265,8 +299,12 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
                         info = {"raw": body2}
                     ok = _check_valid(info, resp2.status)
             except Exception as e_get:
-                info = {"error": f"license verify failed: {e_post} / {e_get}"}
+                tried_errors.append(f"GET {get_url}: {e_get}")
+                info = {"error": f"license verify failed: {'; '.join(tried_errors[-3:])}"}
                 ok = False
+        if not info:
+            info = {"error": f"license verify failed: {'; '.join(tried_errors)}"}
+            ok = False
     except Exception as exc:
         info = {"error": str(exc)[:300]}
         ok = False
@@ -278,6 +316,9 @@ def _verify_license_key(key: str) -> tuple[bool, dict[str, Any]]:
 class TursoStore:
     """Store using Turso/libSQL cloud database."""
     def __init__(self, url: str, token: str) -> None:
+        # Render đôi khi lỗi wss 400/505, ép https như license-server
+        if url and url.startswith("libsql://"):
+            url = url.replace("libsql://", "https://", 1)
         self._url = url
         self._token = token
         self._lock = threading.RLock()
@@ -1336,12 +1377,26 @@ def main() -> int:
         assert len(dup) == 2
         print("SELF-TEST OK: master parse/split."); return 0
 
-    # Chọn store: Turso (cloud) hoặc SQLite local
+    # Chọn store: Turso (cloud) hoặc SQLite local (fallback nếu Turso lỗi 400/wss)
     turso_url = os.environ.get("TURSO_URL", "").strip()
     turso_token = os.environ.get("TURSO_TOKEN", "").strip()
+    # Ép https như license-server để tránh wss 400
+    if turso_url and turso_url.startswith("libsql://"):
+        turso_url = turso_url.replace("libsql://", "https://", 1)
     if turso_url:
-        store = TursoStore(turso_url, turso_token)
-        db_label = f"turso={turso_url.split('//')[1].split('.')[0] if '//' in turso_url else turso_url}"
+        try:
+            store = TursoStore(turso_url, turso_token)
+            # Thử ping nhẹ để phát hiện 400 sớm
+            try:
+                store.fetch("SELECT 1")
+            except Exception as e:
+                print(f"[master] Turso ping fail ({e}), fallback sqlite", flush=True)
+                raise
+            db_label = f"turso={turso_url.split('//')[1].split('.')[0] if '//' in turso_url else turso_url}"
+        except Exception as e:
+            print(f"[master] Không kết nối Turso ({e}), dùng sqlite local", flush=True)
+            store = LocalStore(db_path)
+            db_label = f"sqlite={db_path} (fallback from turso)"
     else:
         store = LocalStore(db_path)
         db_label = f"sqlite={db_path}"
