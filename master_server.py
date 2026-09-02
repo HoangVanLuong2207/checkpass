@@ -861,7 +861,14 @@ class MasterHandler(BaseHTTPRequestHandler):
         try:
             path = self._clean_path()
             if path == "/healthz":
-                self._json(HTTPStatus.OK, {"ok": True, "role": "master", "now": _now()})
+                mt = self.server.master_token or ""
+                lu = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+                self._json(HTTPStatus.OK, {
+                    "ok": True, "role": "master", "now": _now(),
+                    "master_token_len": len(mt),
+                    "master_token_preview": (mt[:4] + "***" + mt[-2:]) if len(mt) > 6 else ("set" if mt else "empty"),
+                    "license_url": lu[:60] if lu else "empty",
+                })
                 return
             if path == "/api/verify":
                 # Endpoint để frontend kiểm tra license key: ?key=xxx hoặc Authorization Bearer
