@@ -59,7 +59,7 @@ SECRET_KEYS = {
 }
 PII_PARTS = ("phone", "mobile", "email", "identity", "passport", "cmnd", "cccd", "id_card")
 ACCOUNT_VISIBLE_PII = frozenset({"email", "email_v", "email_verified", "email_verify"})
-MAX_BATCH_BODY = 512 * 1024
+MAX_BATCH_BODY = 10 * 1024 * 1024
 MAX_BATCH_ACCOUNTS = 10**18
 ACCOUNT_MAX_ATTEMPTS = 3
 KIENTUONG_MAX_RETRIES = 6
@@ -1948,7 +1948,7 @@ function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.classNam
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
 function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
-async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;$('exportXlsxBtn').disabled=false;}}catch(e){}}
+async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(s.rows.length) $('exportXlsxBtn').disabled=false;if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;}}catch(e){}}
 function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
 $('splitBtn').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
@@ -1964,7 +1964,7 @@ $('splitBtn').addEventListener('click',()=>{
  setStatus('Đã chia lọc: '+met.length+' đạt, '+notMet.length+' không đạt',false);
 });
 $('exportXlsxBtn').addEventListener('click',async()=>{
- if(!lastRows.length){setStatus('Chưa có kết quả batch để xuất',true);return;}
+  if(!lastRows.length && !selectedHistoryRunId){setStatus('Chưa có kết quả batch để xuất',true);return;}
  const lv=parseInt($('requiredLevel').value,10)||12;
  setStatus('Đang tạo file XLSX...',false);
  try{
@@ -1993,7 +1993,7 @@ $('f').addEventListener('submit',async ev=>{ev.preventDefault();const b=$('b'),o
  const data=await postJson('/api/test',{credential:input.value});
  out.className=data.ok?'ok':'bad';out.textContent=data.display||data.error||'Không có kết quả';
  input.value='';b.disabled=false;});
-(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(!s.running)$('exportXlsxBtn').disabled=false;if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
+(async function resume(){try{const s=await getState();if(!s||!s.ok)return;if(s.running||s.rows.length){renderRows(s.rows);setStatus(s.running?('Đang chạy: '+s.rows.length+'/'+s.total+'...'):('Lần trước: '+s.rows.length+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);$('batchStart').disabled=!!s.running;if(s.rows.length) $('exportXlsxBtn').disabled=false;if(s.running&&!pollTimer)pollTimer=setInterval(poll,900);}}catch(e){}})();
 async function loadHistory(){
  try{
   const r=await fetch('/api/history',{cache:'no-store',credentials:'same-origin',headers:{'X-API-Test-Token':token}});
@@ -2202,6 +2202,14 @@ class Handler(BaseHTTPRequestHandler):
             try:length=int(self.headers.get("Content-Length", "0"))
             except ValueError:length=0
             if length <= 0 or length > MAX_BATCH_BODY:
+                if length>0:
+                    try:
+                        rem=length
+                        while rem>0:
+                            chunk=self.rfile.read(min(rem, 64*1024))
+                            if not chunk: break
+                            rem-=len(chunk)
+                    except: pass
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
             try:
                 body=json.loads(self.rfile.read(length).decode("utf-8"))
@@ -2265,6 +2273,14 @@ class Handler(BaseHTTPRequestHandler):
             try:length=int(self.headers.get("Content-Length", "0"))
             except ValueError:length=0
             if length<=0 or length>MAX_BODY:
+                if length>0:
+                    try:
+                        rem=length
+                        while rem>0:
+                            chunk=self.rfile.read(min(rem, 64*1024))
+                            if not chunk: break
+                            rem-=len(chunk)
+                    except: pass
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
             try:
                 body=json.loads(self.rfile.read(length).decode("utf-8"))
@@ -2288,6 +2304,14 @@ class Handler(BaseHTTPRequestHandler):
             try:length=int(self.headers.get("Content-Length", "0"))
             except ValueError:length=0
             if length<=0 or length>MAX_BODY:
+                if length>0:
+                    try:
+                        rem=length
+                        while rem>0:
+                            chunk=self.rfile.read(min(rem, 64*1024))
+                            if not chunk: break
+                            rem-=len(chunk)
+                    except: pass
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
             try:
                 body=json.loads(self.rfile.read(length).decode("utf-8"))
@@ -2320,7 +2344,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     not_met.append(r)
             try:
-                import openpyxl
+                import openpyxl, re
                 from openpyxl.styles import Font,PatternFill,Alignment
                 wb=openpyxl.Workbook()
                 header_font=Font(bold=True,color="FFFFFF")
@@ -2349,6 +2373,8 @@ class Handler(BaseHTTPRequestHandler):
                             value=row.get(col_name,"")
                             if col_name == "account":
                                 value=row.get("_credential") or value
+                            if isinstance(value, str):
+                                value=re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', value)
                             ws.cell(row=ri,column=ci,value=value)
                     for c in range(1,len(col_labels)+1):
                         ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width=max(12,len(col_labels[c-1])+2)
@@ -2372,6 +2398,14 @@ class Handler(BaseHTTPRequestHandler):
         try:length=int(self.headers.get("Content-Length", "0"))
         except ValueError:length=0
         if length <= 0 or length > MAX_BODY:
+            if length>0:
+                try:
+                    rem=length
+                    while rem>0:
+                        chunk=self.rfile.read(min(rem, 64*1024))
+                        if not chunk: break
+                        rem-=len(chunk)
+                except: pass
             self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
         try:
             body=json.loads(self.rfile.read(length).decode("utf-8"));credential=str(body.get("credential", "")).strip()

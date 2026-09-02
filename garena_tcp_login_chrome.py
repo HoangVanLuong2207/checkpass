@@ -225,6 +225,16 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_BODY:
+            if length > 0:
+                try:
+                    rem = length
+                    while rem > 0:
+                        chunk = self.rfile.read(min(rem, 64 * 1024))
+                        if not chunk:
+                            break
+                        rem -= len(chunk)
+                except Exception:
+                    pass
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"})
             return
 

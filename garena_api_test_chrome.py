@@ -57,7 +57,7 @@ SECRET_KEYS = {
 }
 PII_PARTS = ("phone", "mobile", "email", "identity", "passport", "cmnd", "cccd", "id_card")
 ACCOUNT_VISIBLE_PII = frozenset({"email", "email_v", "email_verified", "email_verify"})
-MAX_BATCH_BODY = 512 * 1024
+MAX_BATCH_BODY = 10 * 1024 * 1024
 MAX_BATCH_ACCOUNTS = 2000
 
 
@@ -1605,6 +1605,14 @@ class Handler(BaseHTTPRequestHandler):
             try:length=int(self.headers.get("Content-Length", "0"))
             except ValueError:length=0
             if length <= 0 or length > MAX_BATCH_BODY:
+                if length>0:
+                    try:
+                        rem=length
+                        while rem>0:
+                            chunk=self.rfile.read(min(rem, 64*1024))
+                            if not chunk: break
+                            rem-=len(chunk)
+                    except: pass
                 self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
             try:
                 body=json.loads(self.rfile.read(length).decode("utf-8"))
@@ -1649,6 +1657,14 @@ class Handler(BaseHTTPRequestHandler):
         try:length=int(self.headers.get("Content-Length", "0"))
         except ValueError:length=0
         if length <= 0 or length > MAX_BODY:
+            if length>0:
+                try:
+                    rem=length
+                    while rem>0:
+                        chunk=self.rfile.read(min(rem, 64*1024))
+                        if not chunk: break
+                        rem-=len(chunk)
+                except: pass
             self.send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Kích thước request không hợp lệ"});return
         try:
             body=json.loads(self.rfile.read(length).decode("utf-8"));credential=str(body.get("credential", ""))

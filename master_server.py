@@ -28,7 +28,7 @@ DEFAULT_CHUNK_LIMIT = 1000
 MAX_CHUNK_LIMIT = 1000
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 60
-MAX_BODY = 16 * 1024 * 1024
+MAX_BODY = 32 * 1024 * 1024
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -132,6 +132,18 @@ class TursoStore:
             result = _run_async(self._aexec(sql, args))
             return result.last_insert_rowid if hasattr(result, "last_insert_rowid") else 0
 
+    def exec_with_changes(self, sql: str, args: tuple = ()) -> int:
+        with self._lock:
+            result = _run_async(self._aexec(sql, args))
+            # libsql client trả về affected_rows hoặc rowcount
+            for attr in ("affected_rows", "rowcount", "rows_affected"):
+                if hasattr(result, attr):
+                    try:
+                        return int(getattr(result, attr) or 0)
+                    except Exception:
+                        pass
+            return 0
+
     def fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
         with self._lock:
             return _run_async(self._afetch(sql, args))
@@ -162,6 +174,13 @@ class LocalStore:
             cur = self._conn.execute(sql, args)
             self._conn.commit()
             return cur.lastrowid
+
+    def exec_with_changes(self, sql: str, args: tuple = ()) -> int:
+        """Thực thi và trả về số dòng bị ảnh hưởng (dùng cho claim atomic)."""
+        with self._lock:
+            cur = self._conn.execute(sql, args)
+            self._conn.commit()
+            return cur.rowcount
 
     def fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
         with self._lock:
@@ -428,6 +447,17 @@ class MasterHandler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > MAX_BODY:
+            # Drain body để tránh RST khiến browser báo Failed to fetch
+            if length > 0:
+                try:
+                    remaining = length
+                    while remaining > 0:
+                        chunk = self.rfile.read(min(remaining, 64 * 1024))
+                        if not chunk:
+                            break
+                        remaining -= len(chunk)
+                except Exception:
+                    pass
             raise ValueError("Kích thước request không hợp lệ")
         try:
             return json.loads(self.rfile.read(length).decode("utf-8"))
@@ -616,35 +646,55 @@ class MasterHandler(BaseHTTPRequestHandler):
 
         store = self.server.store
         now = _now()
-        row = store.fetchone(
-            """
-            SELECT id, job_id, account FROM chunks
-            WHERE status='pending'
-               OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
-            ORDER BY job_id, idx
-            LIMIT 1
-            """,
-            (now,),
-        )
-        if row is None:
-            self._check_finish_all_jobs(now)
-            self._json(HTTPStatus.OK, {"ok": True, "claim": None})
+        # Thử claim atomic — tránh việc 2 vệ tinh cùng nhận 1 pack và bỏ sót pack nhỏ
+        # Lặp tối đa 3 lần nếu gặp race
+        for _ in range(3):
+            row = store.fetchone(
+                """
+                SELECT id, job_id, account FROM chunks
+                WHERE status='pending'
+                   OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
+                ORDER BY job_id, idx
+                LIMIT 1
+                """,
+                (now,),
+            )
+            if row is None:
+                self._check_finish_all_jobs(now)
+                self._json(HTTPStatus.OK, {"ok": True, "claim": None})
+                return
+            chunk_id, job_id, account_data = row
+            # UPDATE có điều kiện — chỉ thành công nếu vẫn pending/lease hết hạn
+            if hasattr(store, "exec_with_changes"):
+                changed = store.exec_with_changes(
+                    "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+                    (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+                )
+            else:
+                store.exec(
+                    "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+                    (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+                )
+                # Fallback: kiểm tra lại satellite_id
+                chk = store.fetchone("SELECT satellite_id FROM chunks WHERE id=?", (chunk_id,))
+                changed = 1 if (chk and chk[0] == satellite_id) else 0
+            if changed == 0:
+                # Race: chunk đã bị vệ tinh khác lấy, thử chunk khác
+                continue
+            try:
+                accounts = json.loads(account_data)
+            except (json.JSONDecodeError, TypeError):
+                accounts = [account_data] if account_data else []
+            # Đảm bảo luôn trả về đúng số acc của pack, kể cả pack nhỏ (< chunk_size)
+            self._json(HTTPStatus.OK, {"ok": True, "claim": {
+                "chunk_id": chunk_id,
+                "job_id": job_id,
+                "lease_until": now + lease_minutes * 60,
+                "accounts": accounts,
+            }})
             return
-        chunk_id, job_id, account_data = row
-        store.exec(
-            "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
-            (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
-        )
-        try:
-            accounts = json.loads(account_data)
-        except (json.JSONDecodeError, TypeError):
-            accounts = [account_data] if account_data else []
-        self._json(HTTPStatus.OK, {"ok": True, "claim": {
-            "chunk_id": chunk_id,
-            "job_id": job_id,
-            "lease_until": now + lease_minutes * 60,
-            "accounts": accounts,
-        }})
+        # Nếu sau 3 lần vẫn race, báo không có claim để vệ tinh thử lại
+        self._json(HTTPStatus.OK, {"ok": True, "claim": None})
 
     def _handle_report(self) -> None:
         try:
@@ -666,18 +716,27 @@ class MasterHandler(BaseHTTPRequestHandler):
         store = self.server.store
         now = _now()
         chunk = store.fetchone(
-            "SELECT job_id, status FROM chunks WHERE id=?", (chunk_id,)
+            "SELECT job_id, status, account FROM chunks WHERE id=?", (chunk_id,)
         )
         if chunk is None:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "chunk không tồn tại"})
             return
         job_id = chunk[0]
+        # Lấy số acc kỳ vọng của pack (kể cả pack nhỏ < chunk_size)
+        expected_count = None
+        try:
+            expected_accounts = json.loads(chunk[2]) if len(chunk) > 2 and chunk[2] else []
+            expected_count = len(expected_accounts) if isinstance(expected_accounts, list) else None
+        except Exception:
+            expected_count = None
         stmts = []
+        skipped_empty = 0
         for row in rows:
             if not isinstance(row, dict):
                 continue
             account = str(row.get("account", "") or "")
             if not account:
+                skipped_empty += 1
                 continue
             stmts.append({
                 "sql": "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET row_json=excluded.row_json, reported_at=excluded.reported_at",
@@ -690,9 +749,17 @@ class MasterHandler(BaseHTTPRequestHandler):
             })
         if stmts:
             store.batch(stmts)
+        # Kiểm tra sau khi ghi: nếu là pack nhỏ mà số rows thực tế ít hơn kỳ vọng, log cảnh báo để phát hiện mất pack
+        if expected_count is not None:
+            actual = store.fetchone("SELECT COUNT(*) FROM results WHERE chunk_id=?", (chunk_id,))
+            actual_count = actual[0] if actual else 0
+            if is_done and actual_count != expected_count:
+                print(f"[master] cảnh báo: chunk {chunk_id} expected {expected_count} acc nhưng results {actual_count} (rows gửi {len(rows)} skipped_empty {skipped_empty})", flush=True)
+            elif skipped_empty:
+                print(f"[master] chunk {chunk_id} skipped_empty {skipped_empty}/{len(rows)}", flush=True)
         if is_done:
             self._check_finish_all_jobs(now)
-        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done})
+        self._json(HTTPStatus.OK, {"ok": True, "chunk_id": chunk_id, "rows": len(rows), "done": is_done, "expected": expected_count})
 
     def _handle_release(self) -> None:
         try:

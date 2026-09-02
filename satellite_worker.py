@@ -104,7 +104,7 @@ def _run_health_server() -> None:
         print(f"[satellite] health server listening on {HEALTH_HOST}:{HEALTH_PORT}", flush=True)
         server.serve_forever(poll_interval=0.5)
     except Exception as exc:
-        print(f"[satellite] lỗi health server: {exc}", flush=True)
+        print(f"[satellite] loi health server: {exc}", flush=True)
 
 
 def _self_ping_loop() -> None:
@@ -150,36 +150,61 @@ def _process_chunk(client: _Client, tcp_module: Any, claim: dict) -> None:
 
         def on_result(row):
             pub = api_test.public_batch_row(row)
-            flush = []
+            flush = None
             with buffer_lock:
                 buffer.append(pub)
                 if len(buffer) >= FLUSH_SIZE:
                     flush = list(buffer)
-                    buffer.clear()
+                    # không clear ngay — chỉ clear sau khi report thành công để tránh mất pack nhỏ
+                else:
+                    flush = None
             if flush:
                 try:
                     client.report(chunk_id, flush, done=False)
                     sent_count[0] += len(flush)
+                    with buffer_lock:
+                        # xóa đúng số phần tử đã flush (đề phòng buffer đã tăng thêm trong lúc report)
+                        del buffer[:len(flush)]
                 except Exception as exc:
-                    print(f"[satellite] stream report lỗi: {exc}", flush=True)
+                    print(f"[satellite] stream report loi: {exc}", flush=True)
+                    # giu buffer nguyen de retry o lan flush sau hoac o remaining
 
         api_test.run_batch_core(
             credentials, tcp_module, WORKERS, START_GAP, TIMEOUT,
             on_result=on_result,
         )
-        # Gửi phần còn lại + đánh dấu done
+        # Gui phan con lai + danh dau done — dam bao gui het ke ca khi truoc do flush loi
+        # Thu lai den khi thanh cong (toi da 3 lan) de tranh mat pack nho
         with buffer_lock:
             remaining = list(buffer)
             buffer.clear()
-        client.report(chunk_id, remaining, done=True)
+        # Neu so da gui + con lai < tong so acc, canh bao (pack nho de lo bug)
+        expected = len(credentials)
+        total_buffered = sent_count[0] + len(remaining)
+        if total_buffered != expected:
+            print(f"[satellite] canh bao: chunk {chunk_id} expected {expected} nhung buffered {total_buffered} (sent {sent_count[0]} + remaining {len(remaining)})", flush=True)
+            # Neu thieu do flush loi truoc do, remaining da chua phan khoi phuc nen se du
+        for attempt in range(3):
+            try:
+                client.report(chunk_id, remaining, done=True)
+                break
+            except Exception as exc:
+                print(f"[satellite] report done loi lan {attempt+1}: {exc}", flush=True)
+                if attempt == 2:
+                    raise
+                time.sleep(2)
         total = sent_count[0] + len(remaining)
-        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} xong {total} acc", flush=True)
+        # Dam bao total phan anh dung so acc da check, khong phu thuoc kich thuoc pack
+        if total != expected:
+            print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} xong {total}/{expected} acc (da gui {sent_count[0]} + con lai {len(remaining)})", flush=True)
+        else:
+            print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} xong {total} acc", flush=True)
     except Exception as exc:
-        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} lỗi, release: {exc}", flush=True)
+        print(f"[satellite] {SATELLITE_ID}: chunk {chunk_id} loi, release: {exc}", flush=True)
         try:
             client.release(chunk_id)
         except Exception as release_exc:
-            print(f"[satellite] release chunk {chunk_id} thất bại: {release_exc}", flush=True)
+            print(f"[satellite] release chunk {chunk_id} that bai: {release_exc}", flush=True)
     finally:
         for credential in credentials:
             credential.password = ""
@@ -226,7 +251,7 @@ def _worker_loop() -> None:
                 future.add_done_callback(on_chunk_done)
 
             except Exception as exc:
-                print(f"[satellite] lỗi vòng lặp: {exc}; chờ {POLL_INTERVAL}s", flush=True)
+                print(f"[satellite] loi vong lap: {exc}; cho {POLL_INTERVAL}s", flush=True)
                 time.sleep(POLL_INTERVAL)
 
 
