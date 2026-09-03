@@ -722,11 +722,11 @@ async function refreshDetail(){
 
     const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
     if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
-    let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Thời gian</th></tr>';
+    let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Trạng thái tài khoản</th></tr>';
     rd.rows.forEach(r=>{
       const tag=r.status==='OK'?'tag-ok':'tag-fail';
       h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
-      h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+r.elapsed_ms+'ms</td></tr>'
+      h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+(r.player_status||'')+'</td></tr>'
     });
     const totalPages=rd.total_pages||1;
     h+='</table>';
