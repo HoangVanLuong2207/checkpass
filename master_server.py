@@ -623,6 +623,7 @@ tr:hover{background:#1c2128}
   <div style="margin:10px 0;display:flex;gap:8px">
     <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
     <button class="btn btn-sm btn-primary" onclick="exportCsv()" style="background:#1f6feb">📥 Export CSV</button>
+    <button class="btn btn-sm btn-primary" onclick="exportXlsx()" style="background:#8250df">📊 Xuất Excel</button>
   </div>
   <div id="detailRows"><div class="empty">Đang tải...</div></div>
 </div>
@@ -743,6 +744,7 @@ async function refreshDetail(){
 function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
 
 function exportCsv(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.csv?token='+TOKEN)}
+function exportXlsx(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.xlsx?token='+TOKEN)}
 
 loadJobs();setInterval(loadJobs,15000);
 </script>
@@ -972,6 +974,13 @@ class MasterHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
                     return
                 self._handle_job_export(job_id, auth)
+                return
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "export.xlsx":
+                job_id = self._int_or_none(parts[2])
+                if job_id is None:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "job_id không hợp lệ"})
+                    return
+                self._handle_job_export_xlsx(job_id, auth)
                 return
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "Không tìm thấy"})
         except Exception as exc:
@@ -1443,6 +1452,87 @@ class MasterHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self._security_headers("text/csv; charset=utf-8")
         self.send_header("Content-Disposition", f'attachment; filename="job_{job_id}.csv"')
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def _handle_job_export_xlsx(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
+        """Export one job into exclusive result-category sheets (level >= 12 is đạt)."""
+        allowed, job = self._check_job_access(job_id, auth)
+        if job is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        if not allowed:
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền export job này"})
+            return
+
+        rows_raw = self.server.store.fetch(
+            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+        )
+        rows = [json.loads(item[0]) for item in rows_raw]
+        sheets: dict[str, list[dict[str, Any]]] = {
+            "Đạt": [], "Không đạt": [], "CTNV": [], "Bị khóa": [], "Sai pass": [],
+        }
+        for row in rows:
+            player_status = str(row.get("player_status") or "").strip()
+            level = str(row.get("level") or "").strip()
+            result_type = str(row.get("result_type") or "").strip().casefold()
+            if result_type == "sai pass":
+                sheets["Sai pass"].append(row)
+            elif player_status == "Bị khóa":
+                sheets["Bị khóa"].append(row)
+            elif level.casefold() == "ctnv" or player_status == "Chưa tạo nhân vật":
+                sheets["CTNV"].append(row)
+            elif level.isdigit() and int(level) >= 12:
+                sheets["Đạt"].append(row)
+            else:
+                sheets["Không đạt"].append(row)
+
+        try:
+            import re
+            import openpyxl
+            from openpyxl.styles import Alignment, Font, PatternFill
+
+            workbook = openpyxl.Workbook()
+            headers = ["STT", "Tài khoản", "Kết quả check", "UID", "Tên", "Cấp", "Trạng thái tài khoản"]
+            fields = ["stt", "account", "status", "uid", "name", "level", "player_status"]
+            fills = {
+                "Đạt": "238636", "Không đạt": "9E6A03", "CTNV": "8250DF",
+                "Bị khóa": "C2410C", "Sai pass": "DA3633",
+            }
+            for index, (sheet_name, sheet_rows) in enumerate(sheets.items()):
+                worksheet = workbook.active if index == 0 else workbook.create_sheet()
+                worksheet.title = sheet_name
+                fill = PatternFill(start_color=fills[sheet_name], end_color=fills[sheet_name], fill_type="solid")
+                for column, label in enumerate(headers, 1):
+                    cell = worksheet.cell(row=1, column=column, value=label)
+                    cell.font = Font(bold=True, color="FFFFFF")
+                    cell.fill = fill
+                    cell.alignment = Alignment(horizontal="center")
+                for row_index, row in enumerate(sheet_rows, 2):
+                    for column, field in enumerate(fields, 1):
+                        value = str(row.get(field, "") or "")
+                        # Excel rejects ASCII control characters in cell values.
+                        value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", value)
+                        worksheet.cell(row=row_index, column=column, value=value)
+                worksheet.freeze_panes = "A2"
+                worksheet.auto_filter.ref = f"A1:G{max(1, len(sheet_rows) + 1)}"
+                for column, width in enumerate((8, 28, 16, 16, 28, 10, 24), 1):
+                    worksheet.column_dimensions[openpyxl.utils.get_column_letter(column)].width = width
+
+            output = io.BytesIO()
+            workbook.save(output)
+            data = output.getvalue()
+        except Exception as exc:
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Không tạo được file XLSX: {exc}"[:500]})
+            return
+
+        self.send_response(HTTPStatus.OK)
+        self._security_headers("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        self.send_header("Content-Disposition", f'attachment; filename="job_{job_id}_ket_qua.xlsx"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         try:

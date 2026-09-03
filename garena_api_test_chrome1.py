@@ -1357,7 +1357,7 @@ def mask_batch_session_key(value: Any, visible: int = 8) -> str:
 
 BATCH_FIELDNAMES = [
     "stt", "account", "status", "uid",
-    "name", "level", "player_status", "elapsed_ms",
+    "name", "level", "player_status", "result_type", "elapsed_ms",
 ]
 
 
@@ -1472,6 +1472,7 @@ def batch_check_one(
         "deletion_status": "",
         "session_key": "",
         "elapsed_ms": "0",
+        "result_type": "",
         "error": "",
         "_credential": f"{input_account}|{credential.password}",
         "_special": "",
@@ -1679,6 +1680,7 @@ def batch_check_one(
                 "FALSE - sai tài khoản hoặc mật khẩu (TCP từ chối), dừng ngay",
             )
             row["status"] = "FAIL"
+            row["result_type"] = "Sai pass"
         elif gave_up_reason and not tcp_ok:
             errors.insert(
                 0,
