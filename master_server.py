@@ -1470,9 +1470,30 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
 
         rows_raw = self.server.store.fetch(
-            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+            "SELECT chunk_id, row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
         )
-        rows = [json.loads(item[0]) for item in rows_raw]
+        chunks_raw = self.server.store.fetch(
+            "SELECT id, account FROM chunks WHERE job_id=?", (job_id,)
+        )
+        credentials_by_chunk: dict[int, list[str]] = {}
+        for chunk_id, credentials_json in chunks_raw:
+            try:
+                credentials = json.loads(credentials_json)
+            except (TypeError, json.JSONDecodeError):
+                credentials = []
+            credentials_by_chunk[int(chunk_id)] = credentials if isinstance(credentials, list) else []
+        rows = []
+        for chunk_id, row_json in rows_raw:
+            row = json.loads(row_json)
+            try:
+                row_index = int(str(row.get("stt") or "0")) - 1
+            except (TypeError, ValueError):
+                row_index = -1
+            credentials = credentials_by_chunk.get(int(chunk_id), [])
+            if 0 <= row_index < len(credentials):
+                # Chỉ dùng credential gốc cho file tải xuống; không trả qua API/UI.
+                row["_export_credential"] = str(credentials[row_index])
+            rows.append(row)
         sheets: dict[str, list[dict[str, Any]]] = {
             "Đạt": [], "Không đạt": [], "CTNV": [], "Bị khóa": [], "Sai pass": [],
         }
@@ -1514,7 +1535,9 @@ class MasterHandler(BaseHTTPRequestHandler):
                     cell.alignment = Alignment(horizontal="center")
                 for row_index, row in enumerate(sheet_rows, 2):
                     for column, field in enumerate(fields, 1):
-                        value = str(row.get(field, "") or "")
+                        value = str(
+                            row.get("_export_credential") or row.get(field, "") or ""
+                        ) if field == "account" else str(row.get(field, "") or "")
                         # Excel rejects ASCII control characters in cell values.
                         value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", value)
                         worksheet.cell(row=row_index, column=column, value=value)
