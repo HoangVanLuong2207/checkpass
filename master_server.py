@@ -723,6 +723,8 @@ tr:hover{background:#1c2128}
   <h2>📋 Gửi danh sách tài khoản</h2>
   <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass  hoặc  user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
   <div class="row" style="margin-top:12px">
+    <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
+    <div class="field"><label>&nbsp;</label><button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="document.getElementById('accFile').click()">📄 Nhập file</button></div>
     <div class="field"><label>&nbsp;</label><button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button></div>
   </div>
 </div>
@@ -789,6 +791,16 @@ async function checkKey(){
   }catch(e){setClearAllButton(false);st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
 }
 updateOwnerBadge();checkKey();
+
+function importAccountsFile(){
+  const input=document.getElementById('accFile'),file=input&&input.files&&input.files[0];
+  if(!file)return;
+  if(file.size>32*1024*1024){toast('❌ File tối đa 32 MB');input.value='';return;}
+  const reader=new FileReader();
+  reader.onload=()=>{document.getElementById('accInput').value=String(reader.result||'').replace(/^\uFEFF/,'');toast('✅ Đã nhập file '+file.name);input.value='';};
+  reader.onerror=()=>{toast('❌ Không đọc được file');input.value='';};
+  reader.readAsText(file);
+}
 
 async function sendJob(){
   const text=document.getElementById('accInput').value.trim();
