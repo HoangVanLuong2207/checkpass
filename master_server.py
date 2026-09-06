@@ -594,7 +594,6 @@ tr:hover{background:#1c2128}
 
 <div class="card" id="keyCard" style="border-color:#1f6feb">
   <h2>🔐 License Key (f:license-server)</h2>
-  <p style="color:#8b949e;font-size:13px;margin-bottom:10px">Mỗi key chỉ xem được job của mình. Nhập key được cấp từ license-server. Vệ tinh vẫn dùng <code>MASTER_TOKEN</code> để claim mọi job.</p>
   <div class="row">
     <div class="field" style="flex:2"><label>License Key</label><input type="password" id="keyInput" placeholder="Nhập key..."></div>
     <div class="field"><label>&nbsp;</label><button class="btn btn-primary" onclick="saveKey()">✅ Lưu & Kiểm tra</button></div>
@@ -612,7 +611,6 @@ tr:hover{background:#1c2128}
 
 <div class="card">
   <h2>📊 Danh sách Jobs của bạn</h2>
-  <p style="color:#8b949e;font-size:12px;margin-bottom:8px">Chỉ hiện job tạo bởi key hiện tại. Admin (MASTER_TOKEN) sẽ thấy tất cả.</p>
   <div style="margin-bottom:10px"><button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Refresh</button></div>
   <div id="jobsList" class="jobs-list"><div class="empty">Chưa có job nào</div></div>
 </div>
