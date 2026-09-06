@@ -35,7 +35,7 @@ SATELLITE_ID = _env("SATELLITE_ID") or f"{socket.gethostname()}-{os.getpid()}"
 WORKERS = int(_env("WORKERS", "8") or "8")
 START_GAP = float(_env("START_GAP", "3.0") or "3.0")
 TIMEOUT = float(_env("TIMEOUT", "20.0") or "20.0")
-LEASE_MINUTES = float(_env("LEASE_MINUTES", "60") or "60")
+LEASE_MINUTES = float(_env("LEASE_MINUTES", "5") or "5")
 CONCURRENT_CHUNKS = int(_env("CONCURRENT_CHUNKS", "3") or "3")
 POLL_INTERVAL = float(_env("POLL_INTERVAL", "15") or "15")
 # Render Web Service truyền PORT; fallback HEALTH_PORT cho local
@@ -69,6 +69,13 @@ class _Client:
     def claim(self) -> dict:
         return self._request("/api/claim", {
             "satellite_id": SATELLITE_ID,
+            "lease_minutes": LEASE_MINUTES,
+        })
+
+    def heartbeat(self, chunk_ids: list[int]) -> dict:
+        return self._request("/api/heartbeat", {
+            "satellite_id": SATELLITE_ID,
+            "chunk_ids": chunk_ids,
             "lease_minutes": LEASE_MINUTES,
         })
 
@@ -210,6 +217,21 @@ def _process_chunk(client: _Client, tcp_module: Any, claim: dict) -> None:
             credential.password = ""
 
 
+def _lease_heartbeat_loop(client: _Client, active_chunk_ids: set[int], active_chunks_lock: threading.Lock) -> None:
+    """Gia hạn lease định kỳ; nếu vệ tinh chết, lease sẽ tự hết hạn sau 5 phút."""
+    interval = max(15.0, min(60.0, LEASE_MINUTES * 60 / 3))
+    while True:
+        time.sleep(interval)
+        with active_chunks_lock:
+            chunk_ids = list(active_chunk_ids)
+        if not chunk_ids:
+            continue
+        try:
+            client.heartbeat(chunk_ids)
+        except Exception as exc:
+            print(f"[satellite] heartbeat loi: {exc}", flush=True)
+
+
 def _worker_loop() -> None:
     tcp_module = tcp_ui.load_verified_tcp_module()
     client = _Client(MASTER_URL, MASTER_TOKEN)
@@ -223,11 +245,23 @@ def _worker_loop() -> None:
     # Đếm số chunk đang xử lý
     active_count = 0
     active_lock = threading.Lock()
+    active_chunk_ids: set[int] = set()
+    active_chunks_lock = threading.Lock()
 
-    def on_chunk_done(future):
+    def on_chunk_done(future, chunk_id: int):
         nonlocal active_count
         with active_lock:
             active_count = max(0, active_count - 1)
+        with active_chunks_lock:
+            active_chunk_ids.discard(chunk_id)
+
+    heartbeat_thread = threading.Thread(
+        target=_lease_heartbeat_loop,
+        args=(client, active_chunk_ids, active_chunks_lock),
+        daemon=True,
+        name="lease-heartbeat",
+    )
+    heartbeat_thread.start()
 
     with ThreadPoolExecutor(max_workers=CONCURRENT_CHUNKS, thread_name_prefix="chunk") as pool:
         while True:
@@ -249,9 +283,12 @@ def _worker_loop() -> None:
 
                 with active_lock:
                     active_count += 1
+                chunk_id = int(claim["chunk_id"])
+                with active_chunks_lock:
+                    active_chunk_ids.add(chunk_id)
 
                 future = pool.submit(_process_chunk, client, tcp_module, claim)
-                future.add_done_callback(on_chunk_done)
+                future.add_done_callback(lambda done, cid=chunk_id: on_chunk_done(done, cid))
 
             except Exception as exc:
                 err_msg = str(exc)
