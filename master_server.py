@@ -589,6 +589,7 @@ tr:hover{background:#1c2128}
   <h1>🎮 Garena Check Tool</h1>
   <span class="badge">MASTER</span>
   <span id="ownerBadge" style="margin-left:auto;background:#1f6feb;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600"></span>
+  <button class="btn btn-sm" id="clearAllDataBtn" style="display:none;background:#da3633;color:#fff;margin-left:8px" onclick="clearAllData()">🗑️ Clear All Data</button>
   <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-left:8px" onclick="changeKey()">🔑 Đổi Key</button>
 </header>
 
@@ -656,18 +657,19 @@ async function api(path,opt={}){
 
 function previewKey(k){if(!k) return '';if(k.length<=8) return k.slice(0,2)+'***'+k.slice(-1);return k.slice(0,4)+'***'+k.slice(-2);}
 function updateOwnerBadge(){const el=document.getElementById('ownerBadge');if(el) el.textContent=TOKEN?('Key: '+previewKey(TOKEN)):'Chưa có key';const inp=document.getElementById('keyInput');if(inp && !inp.value) inp.value=TOKEN;}
-function changeKey(){const k=prompt('Nhập License Key mới:','');if(k!==null){TOKEN=k.trim();localStorage.setItem('licenseKey',TOKEN);H=getHeaders();updateOwnerBadge();checkKey();loadJobs();toast('Đã đổi key');}}
-async function saveKey(){const inp=document.getElementById('keyInput');const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}TOKEN=k;localStorage.setItem('licenseKey',TOKEN);H=getHeaders();updateOwnerBadge();await checkKey();loadJobs();}
+function setClearAllButton(visible){const btn=document.getElementById('clearAllDataBtn');if(btn)btn.style.display=visible?'inline-block':'none';}
+function changeKey(){const k=prompt('Nhập License Key mới:','');if(k!==null){TOKEN=k.trim();localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();checkKey();loadJobs();toast('Đã đổi key');}}
+async function saveKey(){const inp=document.getElementById('keyInput');const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}TOKEN=k;localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();await checkKey();loadJobs();}
 async function checkKey(){
   const st=document.getElementById('keyStatus');if(!st) return;
-  if(!TOKEN){st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return;}
+  if(!TOKEN){setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return;}
   st.innerHTML='Đang kiểm tra...';
   try{
     const r=await fetch('/api/verify?token='+encodeURIComponent(TOKEN),{headers:getHeaders()});
     const j=await r.json();
-    if(j.valid||j.ok){st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';}
-    else{st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';}
-  }catch(e){st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
+    if(j.valid||j.ok){setClearAllButton(j.is_admin===true);st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';}
+    else{setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';}
+  }catch(e){setClearAllButton(false);st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
 }
 updateOwnerBadge();checkKey();
 
@@ -743,6 +745,17 @@ function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
 
 function exportCsv(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.csv?token='+TOKEN)}
 function exportXlsx(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.xlsx?token='+TOKEN)}
+async function clearAllData(){
+  if(!confirm('Xóa TOÀN BỘ jobs, chunks và kết quả? Không thể hoàn tác.'))return;
+  const btn=document.getElementById('clearAllDataBtn');btn.disabled=true;
+  try{
+    const d=await api('/api/admin/clear_all',{method:'POST',body:'{}'});
+    if(!d.ok){toast('❌ '+(d.error||'Không thể xóa dữ liệu'));return;}
+    currentJobId=null;document.getElementById('detailCard').style.display='none';
+    document.getElementById('jobsList').innerHTML='<div class="empty">Chưa có job nào</div>';
+    toast('✅ Đã xóa '+(d.jobs||0)+' job và '+(d.results||0)+' kết quả');
+  }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;}
+}
 
 loadJobs();setInterval(loadJobs,15000);
 </script>
@@ -1003,6 +1016,9 @@ class MasterHandler(BaseHTTPRequestHandler):
             # Dùng _clean_path để hỗ trợ cả /api/jobs?foo=bar
             path = self._clean_path()
             # Phân biệt endpoint user vs vệ tinh
+            if path == "/api/admin/clear_all":
+                self._handle_clear_all_data()
+                return
             if path == "/api/jobs":
                 auth = self._require_user()
                 if auth is None:
@@ -1060,6 +1076,36 @@ class MasterHandler(BaseHTTPRequestHandler):
                 pass
 
     # --- handlers -----------------------------------------------------
+
+    def _handle_clear_all_data(self) -> None:
+        """Xóa toàn bộ dữ liệu điều phối; chỉ MASTER_TOKEN mới được phép gọi."""
+        master_token = self.server.master_token or ""
+        auth = self._get_auth_info()
+        if not master_token or not auth.get("is_admin"):
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "chỉ MASTER_TOKEN mới được xóa toàn bộ dữ liệu"})
+            return
+
+        store = self.server.store
+        job_count = store.fetchone("SELECT COUNT(*) FROM jobs")
+        chunk_count = store.fetchone("SELECT COUNT(*) FROM chunks")
+        result_count = store.fetchone("SELECT COUNT(*) FROM results")
+        try:
+            # Xóa bảng con trước để dùng được với cả SQLite lẫn Turso.
+            store.batch([
+                {"sql": "DELETE FROM results"},
+                {"sql": "DELETE FROM chunks"},
+                {"sql": "DELETE FROM jobs"},
+            ])
+        except Exception as exc:
+            print(f"[master] clear all data error: {exc}", flush=True)
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"không thể xóa dữ liệu: {exc}"[:300]})
+            return
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "jobs": int(job_count[0] if job_count else 0),
+            "chunks": int(chunk_count[0] if chunk_count else 0),
+            "results": int(result_count[0] if result_count else 0),
+        })
 
     def _handle_jobs_list(self, auth: dict[str, Any] | None = None) -> None:
         store = self.server.store
