@@ -31,8 +31,8 @@ DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
 MAX_CHUNK_LIMIT = 15
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
-DEFAULT_LEASE_MINUTES = 5
-MAX_SATELLITE_LEASE_MINUTES = 5
+DEFAULT_LEASE_MINUTES = 3
+MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_BODY = 32 * 1024 * 1024
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()

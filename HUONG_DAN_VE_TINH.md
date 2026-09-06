@@ -37,7 +37,7 @@
 | `CONCURRENT_CHUNKS` | ❌ | Số chunk xử lý đồng thời | `3` |
 | `START_GAP` | ❌ | Giãn cách (giây) giữa mỗi login TCP | `3.0` |
 | `TIMEOUT` | ❌ | Timeout (giây) mỗi lần login | `20.0` |
-| `LEASE_MINUTES` | ❌ | Thời gian giữ chunk (phút); vệ tinh còn hoạt động sẽ tự gia hạn | `5` |
+| `LEASE_MINUTES` | ❌ | Thời gian giữ chunk (phút); vệ tinh còn hoạt động sẽ tự gia hạn | `3` |
 | `POLL_INTERVAL` | ❌ | Khoảng cách poll khi hết việc (giây) | `15` |
 | `HEALTH_PORT` | ❌ | Port health check | `8765` |
 
