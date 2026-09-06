@@ -800,18 +800,28 @@ async function sendJob(){
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;btn.textContent='🚀 Gửi check'}
 }
 
+function formatJobDuration(start,end){
+  const startTime=Number(start),endTime=Number(end)||Date.now()/1000;
+  if(!Number.isFinite(startTime)||startTime<=0)return '--:--:--';
+  const total=Math.max(0,Math.floor(endTime-startTime));
+  const hours=Math.floor(total/3600),minutes=Math.floor((total%3600)/60),seconds=total%60;
+  return String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0')+':'+String(seconds).padStart(2,'0');
+}
+function updateJobDurations(){document.querySelectorAll('.job-duration').forEach(el=>{el.textContent=formatJobDuration(el.dataset.start,el.dataset.end);});}
+function jobDurationHtml(job){return '<span class="job-duration" data-start="'+Number(job.created_at||0)+'" data-end="'+Number(job.finished_at||0)+'"></span>';}
+
 async function loadJobs(){
   const el=document.getElementById('jobsList');
   try{
     const d=await api('/api/jobs_list');
     if(!d.ok||!d.jobs||d.jobs.length===0){el.innerHTML='<div class="empty">Chưa có job nào</div>';return}
-    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>OK</th><th>Fail</th><th></th></tr>';
+    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>Thời gian</th><th>OK</th><th>Fail</th><th></th></tr>';
     d.jobs.forEach(j=>{
       const st=j.status==='done'?'<span class="tag tag-ok">Xong</span>':'<span class="tag tag-run">Đang chạy</span>';
-      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td>';
+      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td>'+jobDurationHtml(j)+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td>';
       h+='<td><button class="btn btn-sm btn-primary" onclick="viewJob('+j.id+')">Xem</button></td></tr>'
     });
-    el.innerHTML=h+'</table>'
+    el.innerHTML=h+'</table>';updateJobDurations();
   }catch(e){el.innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
 }
 
@@ -835,7 +845,9 @@ async function refreshDetail(){
       '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
       '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Fail</div></div>'+
       '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
-      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
+      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>'+
+      '<div class="stat"><div class="num job-duration" data-start="'+Number(s.created_at||0)+'" data-end="'+Number(s.finished_at||0)+'"></div><div class="lbl">Thời gian chạy</div></div>';
+    updateJobDurations();
 
     const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
     if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
@@ -873,7 +885,7 @@ async function clearAllData(){
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;}
 }
 
-loadJobs();setInterval(loadJobs,15000);
+loadJobs();setInterval(loadJobs,15000);setInterval(updateJobDurations,1000);
 </script>
 </body>
 </html>
@@ -1249,6 +1261,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             ok_count = (results[1] if results else 0) or 0
             jobs.append({
                 "id": job_id,
+                "created_at": row[1],
+                "finished_at": row[5],
                 "total": row[2],
                 "status": row[4],
                 "ok": ok_count,
