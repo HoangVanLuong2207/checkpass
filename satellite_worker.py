@@ -227,16 +227,19 @@ def _worker_loop() -> None:
     def on_chunk_done(future):
         nonlocal active_count
         with active_lock:
-            active_count -= 1
+            active_count = max(0, active_count - 1)
 
     with ThreadPoolExecutor(max_workers=CONCURRENT_CHUNKS, thread_name_prefix="chunk") as pool:
         while True:
             try:
                 # Chờ nếu đủ chunk đang chạy
                 with active_lock:
-                    if active_count >= CONCURRENT_CHUNKS:
-                        time.sleep(1)
-                        continue
+                    at_capacity = active_count >= CONCURRENT_CHUNKS
+                # Do not sleep while holding the lock; completion callbacks need it.
+                # They decrement active_count and free the next claim slot.
+                if at_capacity:
+                    time.sleep(1)
+                    continue
 
                 claim_resp = client.claim()
                 claim = claim_resp.get("claim")
