@@ -32,6 +32,7 @@ DEFAULT_CHUNK_LIMIT = 15
 MAX_CHUNK_LIMIT = 15
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 5
+MAX_SATELLITE_LEASE_MINUTES = 5
 MAX_BODY = 32 * 1024 * 1024
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
@@ -1353,9 +1354,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             lease_minutes = float(body.get("lease_minutes", DEFAULT_LEASE_MINUTES))
         except (TypeError, ValueError):
             lease_minutes = DEFAULT_LEASE_MINUTES
-        if not 1 <= lease_minutes <= 60 * 8:
-            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "lease_minutes không hợp lệ"})
-            return
+        lease_minutes = min(max(lease_minutes, 1), MAX_SATELLITE_LEASE_MINUTES)
 
         store = self.server.store
         now = _now()
@@ -1436,7 +1435,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             lease_minutes = float(body.get("lease_minutes", DEFAULT_LEASE_MINUTES))
         except (TypeError, ValueError):
             lease_minutes = DEFAULT_LEASE_MINUTES
-        lease_minutes = min(max(lease_minutes, 1), 60 * 8)
+        lease_minutes = min(max(lease_minutes, 1), MAX_SATELLITE_LEASE_MINUTES)
         placeholders = ",".join("?" for _ in valid_ids)
         changed = self.server.store.exec_with_changes(
             f"UPDATE chunks SET lease_until=? WHERE status='claimed' AND satellite_id=? AND id IN ({placeholders})",
