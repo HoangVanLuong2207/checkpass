@@ -13,3 +13,5 @@ services:
         sync: false
       - key: LICENSE_SERVER_URL
         sync: false
+      - key: DATABASE_URL
+        sync: false
