@@ -31,7 +31,7 @@ DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
 MAX_CHUNK_LIMIT = 15
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
-DEFAULT_LEASE_MINUTES = 60
+DEFAULT_LEASE_MINUTES = 5
 MAX_BODY = 32 * 1024 * 1024
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
@@ -1159,6 +1159,12 @@ class MasterHandler(BaseHTTPRequestHandler):
                     return
                 self._handle_claim()
                 return
+            if path == "/api/heartbeat":
+                auth = self._require_satellite()
+                if auth is None:
+                    return
+                self._handle_heartbeat()
+                return
             if path == "/api/report":
                 auth = self._require_satellite()
                 if auth is None:
@@ -1402,6 +1408,41 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         # Nếu sau 3 lần vẫn race, báo không có claim để vệ tinh thử lại
         self._json(HTTPStatus.OK, {"ok": True, "claim": None})
+
+    def _handle_heartbeat(self) -> None:
+        """Gia hạn lease cho các chunk mà vệ tinh vẫn đang xử lý."""
+        try:
+            body = self._read_json()
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+        satellite_id = str(body.get("satellite_id") or "").strip()
+        chunk_ids = body.get("chunk_ids")
+        if not satellite_id or not isinstance(chunk_ids, list):
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "cần satellite_id và chunk_ids"})
+            return
+        valid_ids = []
+        for value in chunk_ids[:100]:
+            try:
+                chunk_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if chunk_id > 0:
+                valid_ids.append(chunk_id)
+        if not valid_ids:
+            self._json(HTTPStatus.OK, {"ok": True, "renewed": 0})
+            return
+        try:
+            lease_minutes = float(body.get("lease_minutes", DEFAULT_LEASE_MINUTES))
+        except (TypeError, ValueError):
+            lease_minutes = DEFAULT_LEASE_MINUTES
+        lease_minutes = min(max(lease_minutes, 1), 60 * 8)
+        placeholders = ",".join("?" for _ in valid_ids)
+        changed = self.server.store.exec_with_changes(
+            f"UPDATE chunks SET lease_until=? WHERE status='claimed' AND satellite_id=? AND id IN ({placeholders})",
+            (_now() + lease_minutes * 60, satellite_id, *valid_ids),
+        )
+        self._json(HTTPStatus.OK, {"ok": True, "renewed": changed})
 
     def _handle_report(self) -> None:
         try:
