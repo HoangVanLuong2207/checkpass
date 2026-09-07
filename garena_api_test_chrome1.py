@@ -1373,8 +1373,8 @@ REQUIRED_KIENTUONG_LABEL = "Kiện Tướng"
 # Every account, including one that returns partial data, must have a terminal
 # retry bound.  Without this, an intermittent Kiện Tướng response could hold a
 # worker indefinitely.
-BATCH_MAX_ATTEMPTS = 8
-BATCH_ROW_DEADLINE_SECONDS = 90.0
+BATCH_MAX_ATTEMPTS = 24
+BATCH_ROW_DEADLINE_SECONDS = 180.0
 BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
@@ -1904,7 +1904,7 @@ tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;col
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Chỉ TCP từ chối rõ ràng mới được kết luận <code>FAIL / Sai pass</code>. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 8 lần thử được đánh <code>CHƯA THỂ CHECK</code>, không phải sai pass. XLSX có sáu tab, gồm <code>Sai pass</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Chỉ TCP từ chối rõ ràng mới được kết luận <code>FAIL / Sai pass</code>. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 24 lần thử hoặc 180 giây được đánh <code>CHƯA THỂ CHECK</code>, không phải sai pass. XLSX có sáu tab, gồm <code>Sai pass</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
