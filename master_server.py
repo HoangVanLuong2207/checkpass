@@ -736,7 +736,7 @@ tr:hover{background:#1c2128}
 </div>
 
 <div class="card" id="detailCard" style="display:none">
-  <h2>📝 Chi tiết Job #<span id="detailJobId"></span> <span id="detailOwner" style="font-size:12px;color:#8b949e"></span></h2>
+  <h2>📝 Chi tiết Job #<span id="detailJobId"></span><span id="detailDuration" style="font-size:14px;font-weight:600;color:#8b949e;margin-left:10px"></span> <span id="detailOwner" style="font-size:12px;color:#8b949e"></span></h2>
   <div class="stats" id="detailStats"></div>
   <div style="margin:10px 0;display:flex;gap:8px">
     <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
@@ -853,14 +853,16 @@ async function refreshDetail(){
     const s=await api('/api/jobs/'+id);
     if(!s.ok){document.getElementById('detailStats').innerHTML='<div class="empty">'+s.error+'</div>';return}
     const c=s.chunks||{},r=s.results||{};
+    const duration=document.getElementById('detailDuration');
+    duration.dataset.start=Number(s.created_at||0);duration.dataset.end=Number(s.finished_at||0);
+    duration.textContent=' · ⏱ '+formatJobDuration(duration.dataset.start,duration.dataset.end);
     document.getElementById('detailStats').innerHTML=
       '<div class="stat"><div class="num">'+s.total+'</div><div class="lbl">Tổng</div></div>'+
       '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
       '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Sai pass</div></div>'+
       '<div class="stat pending"><div class="num">'+(r.uncheckable||0)+'</div><div class="lbl">Chưa thể check</div></div>'+
       '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
-      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>'+
-      '<div class="stat"><div class="num job-duration" data-start="'+Number(s.created_at||0)+'" data-end="'+Number(s.finished_at||0)+'"></div><div class="lbl">Thời gian chạy</div></div>';
+      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
     updateJobDurations();
 
     const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
