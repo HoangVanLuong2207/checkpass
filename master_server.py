@@ -1888,6 +1888,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             rows.append(row)
         sheets: dict[str, list[dict[str, Any]]] = {
             "Đạt": [], "Không đạt": [], "CTNV": [], "Bị khóa": [], "Sai pass": [],
+            "Chưa thể check": [],
         }
         for row in rows:
             player_status = str(row.get("player_status") or "").strip()
@@ -1895,6 +1896,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             result_type = str(row.get("result_type") or "").strip().casefold()
             if result_type == "sai pass":
                 sheets["Sai pass"].append(row)
+            elif result_type == "chưa thể check" or str(row.get("status") or "").upper() == "CHƯA THỂ CHECK":
+                sheets["Chưa thể check"].append(row)
             elif player_status == "Bị khóa":
                 sheets["Bị khóa"].append(row)
             elif level.casefold() == "ctnv" or player_status == "Chưa tạo nhân vật":
@@ -1914,7 +1917,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             fields = ["stt", "account", "status", "uid", "name", "level", "player_status"]
             fills = {
                 "Đạt": "238636", "Không đạt": "9E6A03", "CTNV": "8250DF",
-                "Bị khóa": "C2410C", "Sai pass": "DA3633",
+                "Bị khóa": "C2410C", "Sai pass": "DA3633", "Chưa thể check": "D29922",
             }
             for index, (sheet_name, sheet_rows) in enumerate(sheets.items()):
                 worksheet = workbook.active if index == 0 else workbook.create_sheet()
