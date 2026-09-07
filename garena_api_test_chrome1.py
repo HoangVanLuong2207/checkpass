@@ -1370,7 +1370,10 @@ REQUIRED_ACCOUNT_LABEL = "hồ sơ tài khoản"
 REQUIRED_SESSION_LABEL = "session_key"
 REQUIRED_KIENTUONG_LABEL = "Kiện Tướng"
 
-MAX_EMPTY_ATTEMPTS = 8
+# Every account, including one that returns partial data, must have a terminal
+# retry bound.  Without this, an intermittent Kiện Tướng response could hold a
+# worker indefinitely.
+BATCH_MAX_ATTEMPTS = 8
 BATCH_ROW_DEADLINE_SECONDS = 90.0
 BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
@@ -1487,8 +1490,6 @@ def batch_check_one(
     retry_stopped = False
     login_rejected = False
     gave_up_reason = ""
-    has_partial = False
-    empty_reads = 0
     missing: list[str] = []
     effective_timeout = min(float(timeout), BATCH_MAX_REQUEST_TIMEOUT)
     while True:
@@ -1500,8 +1501,6 @@ def batch_check_one(
             )
         except Exception as exc:
             attempt_error = (str(exc).strip() or type(exc).__name__)[:220]
-            if not has_partial:
-                empty_reads += 1
         else:
             result = current_result
             attempt_error = ""
@@ -1515,22 +1514,18 @@ def batch_check_one(
                 break
             if not missing:
                 break
-            if len(missing) < 3:
-                has_partial = True
-                empty_reads = 0
-            elif not has_partial:
-                empty_reads += 1
-        if not has_partial:
-            if empty_reads >= MAX_EMPTY_ATTEMPTS:
-                gave_up_reason = (
-                    f"{MAX_EMPTY_ATTEMPTS} lần thử đều không đọc được dữ liệu nào"
-                )
-                break
-            if time.monotonic() - started >= BATCH_ROW_DEADLINE_SECONDS:
-                gave_up_reason = (
-                    f"quá {BATCH_ROW_DEADLINE_SECONDS:.0f}s không đọc được dữ liệu nào"
-                )
-                break
+        # Apply the bound to both empty and partial results.  A partial result
+        # proves neither a failed password nor a completed check.
+        if attempt_count >= BATCH_MAX_ATTEMPTS:
+            gave_up_reason = (
+                f"quá {BATCH_MAX_ATTEMPTS} lần thử nhưng chưa đọc đủ dữ liệu yêu cầu"
+            )
+            break
+        if time.monotonic() - started >= BATCH_ROW_DEADLINE_SECONDS:
+            gave_up_reason = (
+                f"quá {BATCH_ROW_DEADLINE_SECONDS:.0f}s nhưng chưa đọc đủ dữ liệu yêu cầu"
+            )
+            break
         backoff = min(1.5 * attempt_count, 8.0)
         # FAIL nhanh (< 500ms) thường là rate limit/connection - đợi lâu hơn
         elapsed_so_far = time.monotonic() - started
@@ -1541,6 +1536,8 @@ def batch_check_one(
             break
 
     if result is None:
+        row["status"] = "CHƯA THỂ CHECK"
+        row["result_type"] = "Chưa thể check"
         row["error"] = attempt_error or (
             "đã dừng trước lần kiểm tra lại" if retry_stopped else "không có kết quả kiểm tra"
         )
@@ -1670,10 +1667,10 @@ def batch_check_one(
             errors.append(attempt_error)
         if retry_stopped:
             errors.append("đã dừng trước lần kiểm tra lại")
-        # Dung pass (co UID) thi khong bao gio FAIL - chi sai pass moi FAIL
+        # FAIL is reserved exclusively for an explicit TCP credential rejection.
+        # Network failures, timeouts and incomplete API data remain retryable.
         tcp_ok = bool(tcp_info.get("ok"))
-        succeeded = tcp_ok
-        row["status"] = "OK" if succeeded else "FAIL"
+        row["status"] = "OK" if tcp_ok else "CHƯA THỂ CHECK"
         if login_rejected:
             errors.insert(
                 0,
@@ -1681,13 +1678,14 @@ def batch_check_one(
             )
             row["status"] = "FAIL"
             row["result_type"] = "Sai pass"
-        elif gave_up_reason and not tcp_ok:
+        elif gave_up_reason:
             errors.insert(
                 0,
                 gave_up_reason
-                + " — nghi sai pass hoặc tài khoản có vấn đề, xin tự kiểm tra",
+                + " — chưa thể kết luận tài khoản/mật khẩu",
             )
-            row["status"] = "FAIL"
+            row["status"] = "CHƯA THỂ CHECK"
+            row["result_type"] = "Chưa thể check"
         elif missing:
             reportable_missing = [
                 item
@@ -1700,8 +1698,9 @@ def batch_check_one(
                     + ", ".join(reportable_missing)
                     + f" (sau {attempt_count} lần thử)"
                 )
-            if not tcp_info.get("ok") and reportable_missing:
-                row["status"] = "FAIL"
+            if reportable_missing and (not tcp_info.get("ok") or retry_stopped):
+                row["status"] = "CHƯA THỂ CHECK"
+                row["result_type"] = "Chưa thể check"
         elif retry_stopped and row["status"] == "OK":
             errors.append(f"dừng sớm sau khi đủ dữ liệu, đã kiểm tra {attempt_count} lần")
         if row["status"] == "FAIL":
@@ -1749,7 +1748,7 @@ def run_batch_core(
             try:
                 row = future.result()
             except Exception:
-                row = {"stt": "-", "account": "-", "status": "FAIL"}
+                row = {"stt": "-", "account": "-", "status": "CHƯA THỂ CHECK", "result_type": "Chưa thể check"}
             rows.append(row)
             done = len(rows)
             if done % 50 == 0 or done == total:
@@ -1795,7 +1794,7 @@ def _batch_worker(
         traceback.print_exc()
         with server.batch_lock:
             server.batch_rows.append({
-                "stt": "-", "account": "-", "status": "FAIL", "uid": "", "name": "",
+                "stt": "-", "account": "-", "status": "CHƯA THỂ CHECK", "result_type": "Chưa thể check", "uid": "", "name": "",
                 "level": "", "session_key": "", "elapsed_ms": "",
             })
     finally:
@@ -1881,7 +1880,7 @@ button.warnb{background:#9e6a03}button.ghost{background:#21262d}
 th{color:#8b949e;position:sticky;top:0;background:#1c2128;font-weight:600;font-size:11px;letter-spacing:.03em;text-transform:uppercase;z-index:1}
 tr:hover td{background:#1a1f27}
 .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:11px;line-height:1.4}
-tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;color:#fff}
+tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;color:#fff}tr.uncheckable .badge{background:#9e6a03;color:#fff}
 #out{white-space:pre-wrap;overflow-wrap:anywhere;background:#010409;border:1px solid #30363d;border-radius:8px;padding:12px;min-height:56px;margin-top:10px;font-size:12.5px}
 </style></head><body><main>
 
@@ -1898,14 +1897,14 @@ tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;col
 <button id="batchStop" type="button" class="warnb">Dừng</button>
 <button id="batchExport" type="button" class="ghost">Xuất CSV</button>
 <button id="splitBtn" type="button" class="ghost">Chia lọc theo cấp độ</button>
-<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 5 tab</button>
+<button id="exportXlsxBtn" type="button" class="ghost" disabled>Xuất XLSX 6 tab</button>
 <label class="btnfile">Nhập file<input id="batchImport" type="file" accept=".txt,.csv,text/plain" hidden></label>
 <div id="batchFileName" class="fileinfo">Chưa chọn file.</div>
 <div id="batchStatus">Chưa chạy.</div>
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối được kết luận ngay là sai tài khoản/mật khẩu; TCP trả UID được giữ là tài khoản đúng. Chỉ kiểm tra Kiện Tướng (bỏ qua hồ sơ Garena/email); Kiện Tướng chỉ thử lại tối đa 2 lần và chỉ ghi <code>Ctnv</code> khi API xác nhận phản hồi chưa tạo nhân vật lặp lại. Timeout hoặc lỗi OAuth không bị coi là chưa tạo nhân vật. XLSX có năm tab Đạt, Không đạt, Bị khóa, Đặc biệt và FAIL; cột Tài khoản trong cả năm tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Chỉ TCP từ chối rõ ràng mới được kết luận <code>FAIL / Sai pass</code>. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 8 lần thử được đánh <code>CHƯA THỂ CHECK</code>, không phải sai pass. XLSX có sáu tab, gồm <code>Sai pass</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -1949,9 +1948,9 @@ async function getState(){const r=await fetch('/api/batch/state',{cache:'no-stor
 function setStatus(t,bad){const el=$('batchStatus');el.textContent=t;el.className=bad?'bad':'';}
 function formatDuration(ms){const total=Math.max(0,Math.round((Number(ms)||0)/1000)),h=Math.floor(total/3600),m=Math.floor((total%3600)/60),s=total%60;return(h?h+' giờ ':'')+String(m).padStart(2,'0')+' phút '+String(s).padStart(2,'0')+' giây';}
 function updateTiming(s){const elapsed=Number(s.elapsed_ms)||0,done=s.rows.length,total=Number(s.total)||0;let text='Thời gian: '+formatDuration(elapsed);if(s.running&&done>0&&total>done){const eta=Math.max(0,Math.round(elapsed/done*(total-done)));text+=' · Ước còn '+formatDuration(eta);}else if(!s.running&&done){text+=' · Đã hoàn tất';}$('batchTiming').textContent=text;}
-function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
+function renderRows(rows){const tb=$('batchBody');for(let i=rendered;i<rows.length;i++){const r=rows[i],tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':(r.status==='CHƯA THỂ CHECK'?'uncheckable':'fail');const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);}rendered=rows.length;lastRows=rows;}
 async function poll(){try{const s=await getState();if(!s||!s.ok)return;renderRows(s.rows);updateTiming(s);const done=s.rows.length;setStatus(s.running?('Đang chạy: '+done+'/'+s.total+'...'):('Xong: '+done+'/'+s.total+(s.stopped?' (đã dừng sớm)':'')),false);if(s.rows.length) $('exportXlsxBtn').disabled=false;if(!s.running){if(pollTimer){clearInterval(pollTimer);pollTimer=null;}$('batchStart').disabled=false;}}catch(e){}}
-function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':'fail';const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
+function renderSplitTable(tbodyId,rows){const tb=$(tbodyId);tb.innerHTML='';rows.forEach(r=>{const tr=document.createElement('tr');tr.className=r.status==='OK'?'ok':(r.status==='CHƯA THỂ CHECK'?'uncheckable':'fail');const badge='<span class="badge">'+esc(r.status)+'</span>';tr.innerHTML='<td>'+esc(r.stt)+'</td><td>'+esc(r.account)+'</td><td>'+badge+'</td><td>'+[r.uid,r.name,r.level,r.player_status,r.elapsed_ms].map(esc).join('</td><td>')+'</td>';tb.appendChild(tr);});}
 $('splitBtn').addEventListener('click',()=>{
  if(!lastRows.length){setStatus('Chưa có kết quả batch để chia lọc',true);return;}
  const lv=parseInt($('requiredLevel').value,10)||12;
@@ -2326,10 +2325,13 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 with self.server.batch_lock:
                     rows=[dict(r) for r in self.server.batch_rows]
-            met,not_met,locked,special,failed=[],[],[],[],[]
+            met,not_met,locked,special,failed,uncheckable=[],[],[],[],[],[]
             for r in rows:
                 if str(r.get("status") or "").upper() == "FAIL":
                     failed.append(r)
+                    continue
+                if str(r.get("status") or "").upper() == "CHƯA THỂ CHECK":
+                    uncheckable.append(r)
                     continue
                 # Special accounts have neither Garena Account Center nor
                 # Kien Tuong data. Keep them exclusively in their own sheet
@@ -2355,6 +2357,7 @@ class Handler(BaseHTTPRequestHandler):
                 locked_fill=PatternFill(start_color="c2410c",end_color="c2410c",fill_type="solid")
                 special_fill=PatternFill(start_color="8250df",end_color="8250df",fill_type="solid")
                 failed_fill=PatternFill(start_color="da3633",end_color="da3633",fill_type="solid")
+                uncheckable_fill=PatternFill(start_color="d29922",end_color="d29922",fill_type="solid")
                 col_names=["stt","account","status","uid","name","level","player_status","deletion_status","elapsed_ms"]
                 col_labels=["STT","Tài khoản","Trạng thái","UID Garena","Tên Kiện Tướng","Cấp","Trạng thái KT","Yêu cầu xóa","ms"]
                 sheets=[
@@ -2362,7 +2365,8 @@ class Handler(BaseHTTPRequestHandler):
                     (1,not_met,"Không đạt",not_met_fill),
                     (2,locked,"Bị khóa",locked_fill),
                     (3,special,"Đặc biệt",special_fill),
-                    (4,failed,"FAIL",failed_fill),
+                    (4,failed,"Sai pass",failed_fill),
+                    (5,uncheckable,"Chưa thể check",uncheckable_fill),
                 ]
                 for idx,data_list,label,fill in sheets:
                     ws=wb.active if idx==0 else wb.create_sheet()

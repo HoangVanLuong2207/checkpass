@@ -828,10 +828,10 @@ async function loadJobs(){
   try{
     const d=await api('/api/jobs_list');
     if(!d.ok||!d.jobs||d.jobs.length===0){el.innerHTML='<div class="empty">Chưa có job nào</div>';return}
-    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>Thời gian</th><th>OK</th><th>Fail</th><th></th></tr>';
+    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>Thời gian</th><th>OK</th><th>Sai pass</th><th>Chưa thể check</th><th></th></tr>';
     d.jobs.forEach(j=>{
       const st=j.status==='done'?'<span class="tag tag-ok">Xong</span>':'<span class="tag tag-run">Đang chạy</span>';
-      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td>'+jobDurationHtml(j)+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td>';
+      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td>'+jobDurationHtml(j)+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td><td style="color:#d29922">'+(j.uncheckable||0)+'</td>';
       h+='<td><button class="btn btn-sm btn-primary" onclick="viewJob('+j.id+')">Xem</button></td></tr>'
     });
     el.innerHTML=h+'</table>';updateJobDurations();
@@ -856,7 +856,8 @@ async function refreshDetail(){
     document.getElementById('detailStats').innerHTML=
       '<div class="stat"><div class="num">'+s.total+'</div><div class="lbl">Tổng</div></div>'+
       '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
-      '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Fail</div></div>'+
+      '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Sai pass</div></div>'+
+      '<div class="stat pending"><div class="num">'+(r.uncheckable||0)+'</div><div class="lbl">Chưa thể check</div></div>'+
       '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
       '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>'+
       '<div class="stat"><div class="num job-duration" data-start="'+Number(s.created_at||0)+'" data-end="'+Number(s.finished_at||0)+'"></div><div class="lbl">Thời gian chạy</div></div>';
@@ -866,7 +867,7 @@ async function refreshDetail(){
     if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
     let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Trạng thái tài khoản</th></tr>';
     rd.rows.forEach(r=>{
-      const tag=r.status==='OK'?'tag-ok':'tag-fail';
+      const tag=r.status==='OK'?'tag-ok':(r.status==='CHƯA THỂ CHECK'?'tag-run':'tag-fail');
       h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
       h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+(r.player_status||'')+'</td></tr>'
     });
@@ -1272,12 +1273,17 @@ class MasterHandler(BaseHTTPRequestHandler):
         for row in jobs_raw:
             job_id = row[0]
             results = store.fetchone(
-                "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) "
+                "SELECT COUNT(*), "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) "
                 "FROM results WHERE job_id=?",
                 (job_id,),
             )
             results_count = (results[0] if results else 0) or 0
             ok_count = (results[1] if results else 0) or 0
+            fail_count = (results[2] if results else 0) or 0
+            uncheckable_count = (results[3] if results else 0) or 0
             jobs.append({
                 "id": job_id,
                 "created_at": row[1],
@@ -1285,7 +1291,8 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "total": row[2],
                 "status": row[4],
                 "ok": ok_count,
-                "fail": results_count - ok_count,
+                "fail": fail_count,
+                "uncheckable": uncheckable_count,
                 "owner_preview": row[6] if len(row) > 6 else "",
             })
         self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs})
@@ -1590,11 +1597,17 @@ class MasterHandler(BaseHTTPRequestHandler):
         claimed = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='claimed'", (job_id,)) or [0])[0]
         done = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='done'", (job_id,)) or [0])[0]
         results = store.fetchone(
-            "SELECT COUNT(*), SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) FROM results WHERE job_id=?",
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) "
+            "FROM results WHERE job_id=?",
             (job_id,),
         )
         results_count = (results[0] if results else 0) or 0
         ok_count = (results[1] if results else 0) or 0
+        fail_count = (results[2] if results else 0) or 0
+        uncheckable_count = (results[3] if results else 0) or 0
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
@@ -1605,7 +1618,12 @@ class MasterHandler(BaseHTTPRequestHandler):
             "finished_at": job[5],
             "owner_preview": job[7] if len(job) > 7 else "",
             "chunks": {"pending": pending, "claimed": claimed, "done": done},
-            "results": {"count": results_count, "ok": ok_count, "fail": results_count - ok_count},
+            "results": {
+                "count": results_count,
+                "ok": ok_count,
+                "fail": fail_count,
+                "uncheckable": uncheckable_count,
+            },
         })
 
     def _handle_job_rows(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
