@@ -12,6 +12,7 @@ TOOL AUTO UP LEVEL/
 
 # Ket qua batch local
 *.csv
+satellite_logs/
 
 # Tool skin khong lien quan deploy
 sale_catalog_export.py
