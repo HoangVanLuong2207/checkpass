@@ -762,6 +762,7 @@ tr:hover{background:#1c2128}
     <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
     <button class="btn btn-sm" id="stopJobBtn" onclick="stopCurrentJob()" style="background:#da3633">⏹ Dừng job</button>
     <button class="btn btn-sm btn-primary" onclick="exportTxt()" style="background:#1f6feb">📥 Xuất TXT</button>
+    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e">LV đạt từ <input id="exportMinLevel" type="number" min="1" max="1000" value="12" style="width:58px;padding:6px"></label>
     <button class="btn btn-sm btn-primary" onclick="exportXlsx()" style="background:#8250df">📊 Xuất Excel</button>
   </div>
   <div id="detailRows"><div class="empty">Đang tải...</div></div>
@@ -910,7 +911,7 @@ async function refreshDetail(){
 function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
 
 function exportTxt(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.txt?token='+TOKEN)}
-function exportXlsx(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.xlsx?token='+TOKEN)}
+function exportXlsx(){if(!currentJobId)return;const input=document.getElementById('exportMinLevel');const minLevel=Number(input&&input.value);if(!Number.isInteger(minLevel)||minLevel<1||minLevel>1000){toast('LV tối thiểu phải từ 1 đến 1000');return;}window.open('/api/jobs/'+currentJobId+'/export.xlsx?min_level='+minLevel+'&token='+encodeURIComponent(TOKEN))}
 async function stopCurrentJob(){if(!currentJobId||!confirm('Dừng job này? Các acc chưa xong sẽ không được check tiếp.'))return;const b=document.getElementById('stopJobBtn');b.disabled=true;try{const d=await api('/api/jobs/'+currentJobId+'/stop',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'Không thể dừng job');toast('⏹ Đã yêu cầu dừng job');refreshDetail();loadJobs()}catch(e){toast('❌ '+e.message);b.disabled=false;}}
 async function clearAllData(){
   if(!confirm('Xóa TOÀN BỘ jobs, chunks và kết quả? Không thể hoàn tác.'))return;
@@ -1951,7 +1952,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 grouped_rows["Bị khóa"].append(row)
             elif is_ctnv:
                 grouped_rows["CTNV"].append(row)
-            elif level.isdigit() and int(level) >= 12:
+            elif level.isdigit() and int(level) >= min_level:
                 grouped_rows["Đạt"].append(row)
             else:
                 grouped_rows["Không đạt"].append(row)
@@ -1977,13 +1978,23 @@ class MasterHandler(BaseHTTPRequestHandler):
             pass
 
     def _handle_job_export_xlsx(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
-        """Export one job into exclusive result-category sheets (level >= 12 is đạt)."""
+        """Export one job into exclusive result-category sheets with configurable pass level."""
         allowed, job = self._check_job_access(job_id, auth)
         if job is None:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
             return
         if not allowed:
             self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền export job này"})
+            return
+
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        min_level_raw = query.get("min_level", ["12"])[0]
+        try:
+            min_level = int(min_level_raw)
+        except (TypeError, ValueError):
+            min_level = 0
+        if not 1 <= min_level <= 1000:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "min_level phải là số nguyên từ 1 đến 1000"})
             return
 
         rows_raw = self.server.store.fetch(
@@ -2046,7 +2057,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             }
             for index, (sheet_name, sheet_rows) in enumerate(sheets.items()):
                 worksheet = workbook.active if index == 0 else workbook.create_sheet()
-                worksheet.title = sheet_name
+                worksheet.title = f"Đạt từ LV {min_level}" if sheet_name == "Đạt" else sheet_name
                 fill = PatternFill(start_color=fills[sheet_name], end_color=fills[sheet_name], fill_type="solid")
                 for column, label in enumerate(headers, 1):
                     cell = worksheet.cell(row=1, column=column, value=label)
@@ -2075,7 +2086,7 @@ class MasterHandler(BaseHTTPRequestHandler):
 
         self.send_response(HTTPStatus.OK)
         self._security_headers("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        self.send_header("Content-Disposition", f'attachment; filename="job_{job_id}_ket_qua.xlsx"')
+        self.send_header("Content-Disposition", f'attachment; filename="job_{job_id}_tu_lv_{min_level}.xlsx"')
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         try:
