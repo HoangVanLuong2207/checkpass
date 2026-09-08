@@ -772,7 +772,9 @@ tr:hover{background:#1c2128}
 <div id="toast"></div>
 
 <script>
-let TOKEN=localStorage.getItem('licenseKey')||localStorage.getItem('masterToken')||'';
+const keyFromUrl=new URLSearchParams(window.location.search).get('key');
+let TOKEN=keyFromUrl||localStorage.getItem('licenseKey')||localStorage.getItem('masterToken')||'';
+if(keyFromUrl){localStorage.setItem('licenseKey',TOKEN);history.replaceState(null,'',window.location.pathname);}
 if(!TOKEN){
   TOKEN=prompt('Nhập License Key (key từ f:license-server):','')||'';
   if(TOKEN) localStorage.setItem('licenseKey',TOKEN);
