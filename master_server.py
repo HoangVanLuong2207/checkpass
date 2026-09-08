@@ -10,6 +10,7 @@ không chạy Garena check; dữ liệu nằm trong SQLite trên đĩa.
 import argparse
 import asyncio
 import csv
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import json
@@ -26,6 +27,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
@@ -37,6 +39,7 @@ MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
+MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
 # Cache license: key -> (ok, expiry, info)
 _LICENSE_CACHE: dict[str, tuple[bool, float, dict[str, Any]]] = {}
 _LICENSE_CACHE_LOCK = threading.RLock()
@@ -1115,6 +1118,9 @@ class MasterHandler(BaseHTTPRequestHandler):
             if path == "/" or path == "/index.html":
                 self._html(_PAGE_HTML)
                 return
+            if path == "/api/admin/prune_before_today":
+                self._handle_prune_before_today()
+                return
             # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
             auth = self._require_user()
             if auth is None:
@@ -1280,6 +1286,60 @@ class MasterHandler(BaseHTTPRequestHandler):
             "jobs": int(job_count[0] if job_count else 0),
             "chunks": int(chunk_count[0] if chunk_count else 0),
             "results": int(result_count[0] if result_count else 0),
+        })
+
+    def _handle_prune_before_today(self) -> None:
+        """Xóa job từ hôm kia trở về trước; giữ lại hôm qua và hôm nay."""
+        master_token = self.server.master_token or ""
+        auth = self._get_auth_info()
+        if not master_token or not auth.get("is_admin"):
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "chỉ MASTER_TOKEN mới được phép dọn dữ liệu cũ"})
+            return
+
+        try:
+            tz_info = ZoneInfo(MASTER_TIMEZONE)
+        except Exception:
+            # Windows/Python tối giản có thể không cài tzdata. Việt Nam không có DST,
+            # nên fallback UTC+7 là chính xác cho timezone mặc định của master.
+            if MASTER_TIMEZONE == "Asia/Ho_Chi_Minh":
+                tz_info = timezone(timedelta(hours=7), name="ICT")
+            else:
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"MASTER_TIMEZONE không hợp lệ: {MASTER_TIMEZONE}"})
+                return
+
+        now = datetime.now(tz_info)
+        # Giữ dữ liệu từ 00:00 hôm qua đến hiện tại; chỉ dọn các job từ hôm kia trở về trước.
+        cutoff = (now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)).timestamp()
+        store = self.server.store
+        old_jobs = store.fetchone("SELECT COUNT(*) FROM jobs WHERE created_at < ?", (cutoff,))
+        old_chunks = store.fetchone(
+            "SELECT COUNT(*) FROM chunks WHERE job_id IN (SELECT id FROM jobs WHERE created_at < ?)", (cutoff,)
+        )
+        old_results = store.fetchone(
+            "SELECT COUNT(*) FROM results WHERE job_id IN (SELECT id FROM jobs WHERE created_at < ?)", (cutoff,)
+        )
+        try:
+            # Xóa bảng con trước, dùng transaction để toàn bộ thao tác cùng thành công hoặc cùng bị hủy.
+            store.batch([
+                {"sql": "DELETE FROM results WHERE job_id IN (SELECT id FROM jobs WHERE created_at < ?)", "args": (cutoff,)},
+                {"sql": "DELETE FROM chunks WHERE job_id IN (SELECT id FROM jobs WHERE created_at < ?)", "args": (cutoff,)},
+                {"sql": "DELETE FROM jobs WHERE created_at < ?", "args": (cutoff,)},
+            ])
+        except Exception as exc:
+            print(f"[master] prune old data error: {exc}", flush=True)
+            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"không thể dọn dữ liệu: {exc}"[:300]})
+            return
+
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "timezone": MASTER_TIMEZONE,
+            "cutoff": cutoff,
+            "cutoff_local": datetime.fromtimestamp(cutoff, tz_info).strftime("%Y-%m-%d 00:00:00 %Z"),
+            "deleted": {
+                "jobs": int(old_jobs[0] if old_jobs else 0),
+                "chunks": int(old_chunks[0] if old_chunks else 0),
+                "results": int(old_results[0] if old_results else 0),
+            },
         })
 
     def _handle_jobs_list(self, auth: dict[str, Any] | None = None) -> None:
