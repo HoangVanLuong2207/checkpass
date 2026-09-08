@@ -1935,13 +1935,30 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         store = self.server.store
         rows_raw = store.fetch(
-            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+            "SELECT chunk_id, row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
         )
+        chunks_raw = store.fetch(
+            "SELECT id, account FROM chunks WHERE job_id=?", (job_id,)
+        )
+        credentials_by_chunk: dict[int, list[str]] = {}
+        for chunk_id, credentials_json in chunks_raw:
+            try:
+                credentials = json.loads(credentials_json)
+            except (TypeError, json.JSONDecodeError):
+                credentials = []
+            credentials_by_chunk[int(chunk_id)] = credentials if isinstance(credentials, list) else []
         grouped_rows: dict[str, list[dict[str, Any]]] = {
             "Đạt": [], "Không đạt": [], "CTNV": [], "Chưa thể check": [], "Bị khóa": [], "Sai pass": [],
         }
-        for item in rows_raw:
-            row = json.loads(item[0])
+        for chunk_id, row_json in rows_raw:
+            row = json.loads(row_json)
+            try:
+                row_index = int(str(row.get("stt") or "0")) - 1
+            except (TypeError, ValueError):
+                row_index = -1
+            credentials = credentials_by_chunk.get(int(chunk_id), [])
+            if 0 <= row_index < len(credentials):
+                row["_export_credential"] = str(credentials[row_index])
             level = str(row.get("level") or "").strip()
             player_status = str(row.get("player_status") or "").strip()
             is_ctnv = level.casefold() == "ctnv" or player_status.casefold() == "chưa tạo nhân vật"
@@ -1966,7 +1983,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 is_ctnv = level.casefold() == "ctnv" or player_status.casefold() == "chưa tạo nhân vật"
                 name = "CTNV" if is_ctnv else str(row.get("name") or "").strip()
                 status = player_status or str(row.get("status") or "").strip()
-                lines.append(" || ".join((str(row.get("account") or "").strip(), str(row.get("uid") or "").strip(), name, level, status)))
+                lines.append(" || ".join((str(row.get("_export_credential") or row.get("account") or "").strip(), str(row.get("uid") or "").strip(), name, level, status)))
         body = "\n".join(lines) + ("\n" if lines else "")
         data = body.encode("utf-8-sig")
         self.send_response(HTTPStatus.OK)
