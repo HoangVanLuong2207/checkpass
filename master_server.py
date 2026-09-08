@@ -1952,7 +1952,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 grouped_rows["Bị khóa"].append(row)
             elif is_ctnv:
                 grouped_rows["CTNV"].append(row)
-            elif level.isdigit() and int(level) >= min_level:
+            elif level.isdigit() and int(level) >= 12:
                 grouped_rows["Đạt"].append(row)
             else:
                 grouped_rows["Không đạt"].append(row)
@@ -2038,7 +2038,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 sheets["Bị khóa"].append(row)
             elif level.casefold() == "ctnv" or player_status == "Chưa tạo nhân vật":
                 sheets["CTNV"].append(row)
-            elif level.isdigit() and int(level) >= 12:
+            elif level.isdigit() and int(level) >= min_level:
                 sheets["Đạt"].append(row)
             else:
                 sheets["Không đạt"].append(row)
