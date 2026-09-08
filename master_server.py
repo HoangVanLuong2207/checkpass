@@ -712,6 +712,8 @@ tr:hover{background:#1c2128}
 .empty{color:#484f58;text-align:center;padding:30px}
 #toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:99;box-shadow:0 4px 20px #0006}
 .jobs-list{max-height:500px;overflow-y:auto}
+.retention-notice{background:#d2992230;border:1px solid #d29922;border-radius:10px;padding:12px 14px;margin-bottom:16px;color:#f0d68a;font-size:13px;line-height:1.5}
+.retention-notice strong{color:#ffd66b}
 </style>
 </head>
 <body>
@@ -723,6 +725,10 @@ tr:hover{background:#1c2128}
   <button class="btn btn-sm" id="clearAllDataBtn" style="display:none;background:#da3633;color:#fff;margin-left:8px" onclick="clearAllData()">🗑️ Clear All Data</button>
   <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-left:8px" onclick="changeKey()">🔑 Đổi Key</button>
 </header>
+
+<div class="retention-notice">
+  <strong>⚠️ Chính sách lưu dữ liệu:</strong> Dữ liệu job và kết quả chỉ được lưu tối đa <strong>2 ngày</strong> (hôm nay và hôm qua). Dữ liệu cũ sẽ được dọn tự động; sau khi đã xóa, <strong>kể cả admin cũng không thể khôi phục</strong>.
+</div>
 
 <div class="card" id="keyCard" style="border-color:#1f6feb">
   <h2>🔐 License Key (f:license-server)</h2>
