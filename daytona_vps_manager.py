@@ -16,11 +16,16 @@ from typing import Any
 
 def parse_targets(text: str) -> list[tuple[str, str]]:
     result = []
+    seen_urls: set[str] = set()
     for number, line in enumerate(text.splitlines(), 1):
         match = re.search(r"https?://[^\s]+", line)
         if not match:
             continue
         url = match.group(0).rstrip("/.,;)")
+        normalized_url = url.lower().rstrip("/")
+        if normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
         named = re.search(r"\[([^]]+)\]", line)
         host = urllib.parse.urlsplit(url).hostname or f"render-{number:02}"
         result.append((named.group(1) if named else host, url))
@@ -83,6 +88,9 @@ class Monitor:
         if not entries or self.busy:
             return
         self.busy = True
+        active_labels = {label for label, _url in entries}
+        self.rows = {label: data for label, data in self.rows.items() if label in active_labels}
+        self.render()
         self.status.set(f"Đang quét {len(entries)} dịch vụ...")
 
         def one(item: tuple[str, str]) -> None:
