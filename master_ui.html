@@ -1996,8 +1996,8 @@ function renderFilteredRows() {
     }
 
     const acc = esc(row.account || '');
-    const cleanAcc = (row.account || '').replace(/'/g, "\\'");
-    const copyBtn = acc ? '<button class="copy-btn" onclick="copyToClipboard(\'' + cleanAcc + '\', this)" title="Sao chép tài khoản"><i class="fa-regular fa-copy"></i></button>' : '';
+    const copyData = (row.full_credential || row.account || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const copyBtn = copyData ? '<button class="copy-btn" onclick="copyToClipboard(\'' + copyData + '\', this)" title="Sao chép toàn bộ dòng thông tin (user|pass|mail|...)"><i class="fa-regular fa-copy"></i></button>' : '';
     const lvl = row.level ? '<span class="level-badge">Lv.' + esc(row.level) + '</span>' : '-';
 
     h += '<tr>' +

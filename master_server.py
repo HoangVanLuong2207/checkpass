@@ -640,6 +640,7 @@ class PostgreSQLStore:
 class ParsedAccount:
     account: str
     password: str
+    raw_line: str = ""
 
 
 def parse_accounts(text: str) -> list[ParsedAccount]:
@@ -662,7 +663,7 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
             raise ValueError(f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)")
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
-        result.append(ParsedAccount(account, password))
+        result.append(ParsedAccount(account, password, raw_line=line))
     if not result:
         raise ValueError("Danh sách trống hoặc không có dòng hợp lệ")
     return result
@@ -1188,7 +1189,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             stmts = []
             for idx, chunk in enumerate(chunks):
                 accounts_json = json.dumps(
-                    [f"{acc.account}|{acc.password}" for acc in chunk],
+                    [acc.raw_line or f"{acc.account}|{acc.password}" for acc in chunk],
                     ensure_ascii=False,
                 )
                 stmts.append({
@@ -1665,10 +1666,33 @@ class MasterHandler(BaseHTTPRequestHandler):
         page = min(page, total_pages)
         offset = (page - 1) * per_page
         rows_raw = store.fetch(
-            "SELECT row_json FROM results WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
+            "SELECT chunk_id, row_json FROM results WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
             (job_id, per_page, offset),
         )
-        rows = [json.loads(item[0]) for item in rows_raw]
+        chunks_raw = store.fetch(
+            "SELECT id, account FROM chunks WHERE job_id=?", (job_id,)
+        )
+        credentials_by_chunk: dict[int, list[str]] = {}
+        for chunk_id_raw, credentials_json in chunks_raw:
+            try:
+                credentials = json.loads(credentials_json)
+            except (TypeError, json.JSONDecodeError):
+                credentials = []
+            credentials_by_chunk[int(chunk_id_raw)] = credentials if isinstance(credentials, list) else []
+
+        rows = []
+        for chunk_id_res, item_json in rows_raw:
+            row = json.loads(item_json)
+            try:
+                row_index = int(str(row.get("stt") or "0")) - 1
+            except (TypeError, ValueError):
+                row_index = -1
+            creds = credentials_by_chunk.get(int(chunk_id_res), [])
+            if 0 <= row_index < len(creds):
+                row["full_credential"] = str(creds[row_index])
+            else:
+                row["full_credential"] = str(row.get("account") or "")
+            rows.append(row)
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
