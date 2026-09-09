@@ -115,7 +115,12 @@ class App:
         self.refreshing = True
         self.status.set(f"Đang quét {len(entries)} VPS...")
         def one(label: str, target: str) -> None:
-            ok, output = run_ssh(target, f"cd /opt/checkpass && .venv/bin/python -c \"{HEALTH_CODE}\"", 20)
+            command = (
+                f"cd /opt/checkpass && if .venv/bin/python -c \"{HEALTH_CODE}\" 2>/dev/null; then true; "
+                "else echo __HEALTH_UNAVAILABLE__; pgrep -af '[s]atellite_worker.py' || true; "
+                "tail -n 12 /var/log/checkpass-satellite.log 2>&1 || true; fi"
+            )
+            ok, output = run_ssh(target, command, 20)
             try: data = json.loads(output) if ok else {"last_error": output}
             except json.JSONDecodeError: data = {"last_error": output}
             self.events.put(("health", label, bool(data.get("ok")), data))
