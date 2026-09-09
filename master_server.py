@@ -1678,18 +1678,21 @@ class MasterHandler(BaseHTTPRequestHandler):
         player_status_sql = "LOWER(COALESCE(json_extract(row_json,'$.player_status'),''))"
         level_text_sql = "COALESCE(json_extract(row_json,'$.level'),'')"
         if isinstance(store, PostgreSQLStore):
+            like_any = "%%"
             numeric_level_sql = (
                 f"CASE WHEN {level_text_sql} ~ '^[0-9]+$' "
                 f"THEN CAST({level_text_sql} AS INTEGER) ELSE 0 END"
             )
         else:
+            like_any = "%"
             numeric_level_sql = f"CAST({level_text_sql} AS INTEGER)"
         category_sql = (
             "CASE "
             f"WHEN {status_sql}='CHƯA THỂ CHECK' OR {result_type_sql}='chưa thể check' THEN 'PENDING' "
             f"WHEN UPPER({status_sql})!='OK' OR {result_type_sql}='sai pass' THEN 'FAIL' "
-            f"WHEN {player_status_sql} LIKE '%khóa%' OR {player_status_sql} LIKE '%ban%' "
-            f"OR {player_status_sql} LIKE '%cấm%' THEN 'LOCKED' "
+            f"WHEN {player_status_sql} LIKE '{like_any}khóa{like_any}' "
+            f"OR {player_status_sql} LIKE '{like_any}ban{like_any}' "
+            f"OR {player_status_sql} LIKE '{like_any}cấm{like_any}' THEN 'LOCKED' "
             f"WHEN {numeric_level_sql}>=? THEN 'OK' "
             "ELSE 'NOT_MET' END"
         )
