@@ -341,13 +341,23 @@ body {
   border-color: var(--border-light);
 }
 
+/* Top Section: Notice + Overview Stats */
+.top-section-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(380px, 1fr);
+  gap: 18px;
+  align-items: stretch;
+  margin: 20px 0 22px;
+}
+
 /* Banner / Notice */
 .notice-box {
-  margin: 20px 0 20px;
+  margin: 0;
+  height: 100%;
   background: #FFFBEB;
   border: 1px solid #FDE68A;
   border-radius: var(--radius);
-  padding: 16px 20px;
+  padding: 18px 20px;
   display: flex;
   gap: 16px;
   align-items: flex-start;
@@ -365,6 +375,9 @@ body {
   font-size: 13px;
   line-height: 1.6;
   color: #78350F;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
 .notice-content strong {
   color: #92400E;
@@ -372,7 +385,7 @@ body {
 .notice-badges {
   display: flex;
   gap: 8px;
-  margin-top: 8px;
+  margin-top: 10px;
   flex-wrap: wrap;
 }
 .notice-tag {
@@ -385,21 +398,22 @@ body {
   font-weight: 600;
 }
 
-/* Top Overview Stats Grid */
+/* Top Overview Stats Grid (2x2 Layout) */
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 22px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin: 0;
+  height: 100%;
 }
 .overview-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 18px 20px;
+  padding: 14px 16px;
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   transition: all 0.25s ease;
   position: relative;
   box-shadow: var(--shadow-sm);
@@ -410,13 +424,13 @@ body {
   box-shadow: var(--shadow);
 }
 .overview-icon {
-  width: 48px;
-  height: 48px;
+  width: 44px;
+  height: 44px;
   border-radius: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 20px;
+  font-size: 19px;
   flex-shrink: 0;
 }
 .overview-icon.jobs { background: #EDE9FE; color: #7C3AED; }
@@ -1174,8 +1188,8 @@ table.data-table tbody tr:hover {
 
 /* Responsive */
 @media (max-width: 1024px) {
-  .overview-grid {
-    grid-template-columns: repeat(2, 1fr);
+  .top-section-row {
+    grid-template-columns: 1fr;
   }
   .detail-stats-grid {
     grid-template-columns: repeat(3, 1fr);
@@ -1266,54 +1280,59 @@ table.data-table tbody tr:hover {
 </header>
 
 <div class="container">
-  <!-- System Notice Banner -->
-  <div class="notice-box" id="noticeBox">
-    <div class="notice-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
-    <div class="notice-content">
-      <div>
-        <strong>⚠️ CHÍNH SÁCH HỆ THỐNG &amp; LƯU Ý CHECK:</strong>
-        Dữ liệu job và kết quả được lưu tối đa <strong>2 ngày</strong> (hôm nay &amp; hôm qua). Sau thời gian này hệ thống tự dọn dẹp sạch, kể cả Admin cũng không thể khôi phục.
-      </div>
-      <div style="margin-top:4px;color:#92400E">
-        • Tool check không sử dụng proxy: chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau khi check mà lpass, Admin không chịu trách nhiệm.<br>
-        • Nếu gặp tài khoản đặc biệt bị treo quá lâu không trả kết quả, hãy chủ động bấm nút <strong>Dừng đơn</strong> và tạo đơn mới để tránh nghẽn tiến trình.
-      </div>
-      <div class="notice-badges">
-        <span class="notice-tag"><i class="fa-regular fa-clock"></i> Lưu trữ: 48h</span>
-        <span class="notice-tag"><i class="fa-solid fa-bolt"></i> Siêu tốc độ TCP</span>
-        <span class="notice-tag"><i class="fa-solid fa-shield"></i> Mã hóa an toàn</span>
+  <!-- Top Section Row: Notice + Overview Stats (2x2) -->
+  <div class="top-section-row">
+    <!-- System Notice Banner -->
+    <div class="notice-box" id="noticeBox">
+      <div class="notice-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+      <div class="notice-content">
+        <div>
+          <div>
+            <strong>⚠️ CHÍNH SÁCH HỆ THỐNG &amp; LƯU Ý CHECK:</strong>
+            Dữ liệu job và kết quả được lưu tối đa <strong>2 ngày</strong> (hôm nay &amp; hôm qua). Sau thời gian này hệ thống tự dọn dẹp sạch, kể cả Admin cũng không thể khôi phục.
+          </div>
+          <div style="margin-top:6px;color:#92400E">
+            • Tool check không sử dụng proxy: chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau khi check mà lpass, Admin không chịu trách nhiệm.<br>
+            • Nếu gặp tài khoản bị treo quá lâu không trả kết quả, hãy bấm nút <strong>Dừng đơn</strong> và tạo đơn mới để tránh nghẽn tiến trình.
+          </div>
+        </div>
+        <div class="notice-badges">
+          <span class="notice-tag"><i class="fa-regular fa-clock"></i> Lưu trữ: 48h</span>
+          <span class="notice-tag"><i class="fa-solid fa-bolt"></i> Siêu tốc độ TCP</span>
+          <span class="notice-tag"><i class="fa-solid fa-shield"></i> Mã hóa an toàn</span>
+        </div>
       </div>
     </div>
-  </div>
 
-  <!-- Top Overview Stats -->
-  <div class="overview-grid">
-    <div class="overview-card">
-      <div class="overview-icon jobs"><i class="fa-solid fa-layer-group"></i></div>
-      <div class="overview-info">
-        <div class="overview-num" id="topTotalJobs">0</div>
-        <div class="overview-label">Tổng số Jobs</div>
+    <!-- Top Overview Stats (Bố cục 2x2) -->
+    <div class="overview-grid">
+      <div class="overview-card">
+        <div class="overview-icon jobs"><i class="fa-solid fa-layer-group"></i></div>
+        <div class="overview-info">
+          <div class="overview-num" id="topTotalJobs">0</div>
+          <div class="overview-label">Tổng số Jobs</div>
+        </div>
       </div>
-    </div>
-    <div class="overview-card">
-      <div class="overview-icon running"><i class="fa-solid fa-bolt-lightning"></i></div>
-      <div class="overview-info">
-        <div class="overview-num" id="topRunningJobs">0</div>
-        <div class="overview-label">Jobs đang chạy</div>
+      <div class="overview-card">
+        <div class="overview-icon running"><i class="fa-solid fa-bolt-lightning"></i></div>
+        <div class="overview-info">
+          <div class="overview-num" id="topRunningJobs">0</div>
+          <div class="overview-label">Jobs đang chạy</div>
+        </div>
       </div>
-    </div>
-    <div class="overview-card">
-      <div class="overview-icon done"><i class="fa-solid fa-circle-check"></i></div>
-      <div class="overview-info">
-        <div class="overview-num" id="topDoneJobs">0</div>
-        <div class="overview-label">Jobs hoàn thành</div>
+      <div class="overview-card">
+        <div class="overview-icon done"><i class="fa-solid fa-circle-check"></i></div>
+        <div class="overview-info">
+          <div class="overview-num" id="topDoneJobs">0</div>
+          <div class="overview-label">Jobs hoàn thành</div>
+        </div>
       </div>
-    </div>
-    <div class="overview-card">
-      <div class="overview-icon accounts"><i class="fa-solid fa-users"></i></div>
-      <div class="overview-info">
-        <div class="overview-num" id="topTotalAccs">0</div>
-        <div class="overview-label">Tổng tài khoản</div>
+      <div class="overview-card">
+        <div class="overview-icon accounts"><i class="fa-solid fa-users"></i></div>
+        <div class="overview-info">
+          <div class="overview-num" id="topTotalAccs">0</div>
+          <div class="overview-label">Tổng tài khoản</div>
+        </div>
       </div>
     </div>
   </div>
