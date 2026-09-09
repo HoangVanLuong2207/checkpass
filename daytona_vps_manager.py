@@ -76,6 +76,9 @@ class App:
             ttk.Entry(form, textvariable=var, width=width, show="*" if hidden else "").grid(row=0, column=col * 2 + 1, padx=(0, 12))
         ttk.Button(setup, text="Setup + chạy tất cả", command=self.setup).pack(anchor="w", pady=15)
         ttk.Label(setup, textvariable=self.status).pack(anchor="w")
+        ttk.Label(setup, text="Kết quả setup từng VPS:").pack(anchor="w", pady=(12, 3))
+        self.setup_log = tk.Text(setup, height=13, font=("Consolas", 9), state="disabled")
+        self.setup_log.pack(fill="both", expand=True)
 
         bar = ttk.Frame(health); bar.pack(fill="x")
         ttk.Button(bar, text="Quét ngay", command=self.refresh).pack(side="left")
@@ -97,6 +100,9 @@ class App:
         entries, token = self.entries(), self.master_token.get().strip()
         if not entries or not token:
             self.status.set("Cần danh sách SSH và MASTER_TOKEN"); return
+        self.setup_log.configure(state="normal")
+        self.setup_log.delete("1.0", "end")
+        self.setup_log.configure(state="disabled")
         self.status.set(f"Đang setup {len(entries)} VPS...")
         def one(label: str, target: str) -> None:
             env = "\n".join((f"MASTER_URL={self.master_url.get().strip()}", f"MASTER_TOKEN={token}", f"SATELLITE_ID={label}", f"WORKERS={self.workers.get()}", f"CONCURRENT_CHUNKS={self.chunks.get()}", f"START_GAP={self.gap.get()}", "TIMEOUT=20", "LEASE_MINUTES=3", "POLL_INTERVAL=10", "HEALTH_HOST=127.0.0.1", "HEALTH_PORT=8765", ""))
@@ -146,7 +152,12 @@ class App:
         try:
             while True:
                 kind, label, ok, data = self.events.get_nowait()
-                if kind == "setup": self.status.set(f"{label}: {'OK' if ok else 'lỗi'}")
+                if kind == "setup":
+                    self.status.set(f"{label}: {'OK' if ok else 'lỗi'}")
+                    self.setup_log.configure(state="normal")
+                    self.setup_log.insert("end", f"\n[{label}] {'OK' if ok else 'LỖI'}\n{data[-1800:]}\n")
+                    self.setup_log.see("end")
+                    self.setup_log.configure(state="disabled")
                 elif kind == "health":
                     self.rows[label] = data
                     changed = True
