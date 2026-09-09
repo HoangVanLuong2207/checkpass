@@ -82,7 +82,7 @@ class App:
 
         bar = ttk.Frame(health); bar.pack(fill="x")
         ttk.Button(bar, text="Quét ngay", command=self.refresh).pack(side="left")
-        ttk.Checkbutton(bar, text="Tự quét 5 giây", variable=self.auto).pack(side="left", padx=12)
+        ttk.Checkbutton(bar, text="Tự quét 15 giây", variable=self.auto).pack(side="left", padx=12)
         ttk.Label(bar, textvariable=self.status).pack(side="right")
         columns = ("id", "state", "chunks", "accounts", "done", "active", "recent", "error")
         self.table = ttk.Treeview(health, columns=columns, show="headings", height=19)
@@ -142,7 +142,7 @@ class App:
 
     def _schedule_refresh(self) -> None:
         if self.auto.get() and self.next_refresh is None:
-            self.next_refresh = self.root.after(5000, self._scheduled_refresh)
+            self.next_refresh = self.root.after(15000, self._scheduled_refresh)
 
     def _scheduled_refresh(self) -> None:
         self.next_refresh = None
@@ -160,7 +160,15 @@ class App:
                     self.setup_log.see("end")
                     self.setup_log.configure(state="disabled")
                 elif kind == "health":
-                    self.rows[label] = data
+                    if data.get("ok"):
+                        data["_monitor_error"] = ""
+                        self.rows[label] = data
+                    else:
+                        # A busy Daytona gateway can time out SSH while the worker
+                        # remains healthy. Keep the last successful counters.
+                        previous = dict(self.rows.get(label, {}))
+                        previous["_monitor_error"] = str(data.get("last_error") or "Không đọc được health")
+                        self.rows[label] = previous
                     changed = True
                 elif kind == "scan_done":
                     self.refreshing = False
@@ -177,7 +185,10 @@ class App:
             details = data.get("active_chunk_details") or []
             pending = ", ".join(account for chunk in details for account in chunk.get("pending_accounts", [])[:5])
             recent = ", ".join(data.get("recent_checked_accounts") or ["—"])
-            self.table.insert("", "end", iid=label, values=(label, "Online" if data.get("ok") else "Offline", f"{data.get('chunks_claimed',0)}/{data.get('chunks_completed',0)}", f"{data.get('accounts_claimed',0)}/{data.get('accounts_completed',0)}", data.get("chunks_active",0), pending[:150] or "—", recent[:220], str(data.get("last_error", ""))[:200]))
+            monitor_error = str(data.get("_monitor_error") or "")
+            state = "Online" if data.get("ok") else ("SSH chậm · dữ liệu cũ" if data else "SSH chậm")
+            error = monitor_error or str(data.get("last_error", ""))
+            self.table.insert("", "end", iid=label, values=(label, state, f"{data.get('chunks_claimed',0)}/{data.get('chunks_completed',0)}", f"{data.get('accounts_claimed',0)}/{data.get('accounts_completed',0)}", data.get("chunks_active",0), pending[:150] or "—", recent[:220], error[:200]))
 
     def show_detail(self, _event: Any) -> None:
         selected = self.table.selection()
