@@ -40,6 +40,8 @@ def run_ssh(target: str, command: str, timeout: int = 900) -> tuple[bool, str]:
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout,
         )
         return result.returncode == 0, result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        return False, f"SSH không phản hồi trong {timeout}s"
     except Exception as exc:
         return False, str(exc)
 
@@ -120,12 +122,13 @@ class App:
                 "else echo __HEALTH_UNAVAILABLE__; pgrep -af '[s]atellite_worker.py' || true; "
                 "tail -n 12 /var/log/checkpass-satellite.log 2>&1 || true; fi"
             )
-            ok, output = run_ssh(target, command, 20)
+            ok, output = run_ssh(target, command, 45)
             try: data = json.loads(output) if ok else {"last_error": output}
             except json.JSONDecodeError: data = {"last_error": output}
             self.events.put(("health", label, bool(data.get("ok")), data))
         def scan() -> None:
-            with ThreadPoolExecutor(max_workers=min(16, len(entries))) as pool:
+            # Daytona may close or delay many simultaneous SSH sessions under load.
+            with ThreadPoolExecutor(max_workers=min(4, len(entries))) as pool:
                 list(pool.map(lambda item: one(*item), entries))
             self.events.put(("scan_done", "", True, {}))
         threading.Thread(target=scan, daemon=True).start()
