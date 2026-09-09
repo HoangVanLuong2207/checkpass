@@ -111,7 +111,8 @@ class App:
                 f"if [ -d /opt/checkpass/.git ]; then cd /opt/checkpass && git pull --ff-only origin main; else git clone -q {REPO} /opt/checkpass; fi; "
                 "cd /opt/checkpass; python3 -m venv .venv; .venv/bin/pip install -q -r requirements.txt; "
                 f"printf '%s' '{encoded}' | base64 -d > /etc/checkpass-satellite.env; chmod 600 /etc/checkpass-satellite.env; "
-                "set -a; . /etc/checkpass-satellite.env; set +a; pkill -f '[s]atellite_worker.py' || true; "
+                "set -a; . /etc/checkpass-satellite.env; set +a; "
+                "for pid in $(ps -eo pid=,args= | awk '$2 ~ /python/ && $0 ~ /satellite_worker[.]py/ {print $1}'); do kill $pid || true; done; "
                 "nohup .venv/bin/python satellite_worker.py > /var/log/checkpass-satellite.log 2>&1 < /dev/null & sleep 3; tail -n 4 /var/log/checkpass-satellite.log")
             ok, output = run_ssh(target, command); self.events.put(("setup", label, ok, output))
         threading.Thread(target=lambda: list(ThreadPoolExecutor(max_workers=8).map(lambda item: one(*item), entries)), daemon=True).start()
