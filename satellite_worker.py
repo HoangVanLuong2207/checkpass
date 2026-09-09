@@ -66,20 +66,28 @@ class _RuntimeStatus:
         self.failed_chunks = 0
         self.claimed_accounts = 0
         self.completed_accounts = 0
-        self.active_chunks: dict[int, dict[str, int]] = {}
+        self.active_chunks: dict[int, dict[str, Any]] = {}
+        self.recent_checked_accounts: list[str] = []
         self.last_error = ""
 
-    def claim(self, chunk_id: int, account_count: int) -> None:
+    def claim(self, chunk_id: int, accounts: list[str]) -> None:
         with self._lock:
             self.claimed_chunks += 1
-            self.claimed_accounts += account_count
-            self.active_chunks[chunk_id] = {"accounts": account_count, "processed": 0}
+            self.claimed_accounts += len(accounts)
+            self.active_chunks[chunk_id] = {
+                "accounts": len(accounts), "processed": 0, "pending_accounts": list(accounts),
+            }
 
-    def account_done(self, chunk_id: int) -> None:
+    def account_done(self, chunk_id: int, account: str = "") -> None:
         with self._lock:
             chunk = self.active_chunks.get(chunk_id)
             if chunk is not None:
                 chunk["processed"] += 1
+                if account in chunk["pending_accounts"]:
+                    chunk["pending_accounts"].remove(account)
+            if account:
+                self.recent_checked_accounts.append(account)
+                del self.recent_checked_accounts[:-30]
 
     def finish(self, chunk_id: int, successful: bool, error: str = "") -> None:
         with self._lock:
@@ -114,6 +122,12 @@ class _RuntimeStatus:
                 "accounts_completed": self.completed_accounts,
                 "accounts_active": active_accounts,
                 "accounts_processed_active": processed_active,
+                "active_chunk_details": [
+                    {"chunk_id": chunk_id, "accounts": chunk["accounts"], "processed": chunk["processed"],
+                     "pending_accounts": chunk["pending_accounts"][:30]}
+                    for chunk_id, chunk in self.active_chunks.items()
+                ],
+                "recent_checked_accounts": list(self.recent_checked_accounts),
                 "last_error": self.last_error,
             }
 
@@ -242,7 +256,7 @@ def _process_chunk(client: _Client, tcp_module: Any, claim: dict, stop_event: th
             if stop_event.is_set():
                 return
             pub = api_test.public_batch_row(row)
-            RUNTIME_STATUS.account_done(chunk_id)
+            RUNTIME_STATUS.account_done(chunk_id, str(pub.get("account") or ""))
             flush = None
             with buffer_lock:
                 buffer.append(pub)
@@ -381,7 +395,8 @@ def _worker_loop() -> None:
 
                 with active_lock:
                     active_count += 1
-                RUNTIME_STATUS.claim(int(claim["chunk_id"]), len(claim.get("accounts") or []))
+                claimed_accounts = [str(item).split("|", 1)[0].split(":", 1)[0].strip() for item in (claim.get("accounts") or [])]
+                RUNTIME_STATUS.claim(int(claim["chunk_id"]), claimed_accounts)
                 chunk_id = int(claim["chunk_id"])
                 chunk_stop_event = threading.Event()
                 with active_chunks_lock:
