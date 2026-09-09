@@ -56,9 +56,11 @@ class App:
         self.auto = tk.BooleanVar(value=True)
         self.status = tk.StringVar(value="Sẵn sàng")
         self.rows: dict[str, dict[str, Any]] = {}
+        self.refreshing = False
+        self.next_refresh: str | None = None
         self._build()
         self.root.after(200, self._drain)
-        self.root.after(3000, self.refresh)
+        self.root.after(1000, self.refresh)
 
     def _build(self) -> None:
         tabs = ttk.Notebook(self.root); tabs.pack(fill="both", expand=True, padx=10, pady=10)
@@ -108,21 +110,45 @@ class App:
 
     def refresh(self) -> None:
         entries = self.entries()
-        if not entries: return
+        if not entries or self.refreshing:
+            return
+        self.refreshing = True
+        self.status.set(f"Đang quét {len(entries)} VPS...")
         def one(label: str, target: str) -> None:
             ok, output = run_ssh(target, f"cd /opt/checkpass && .venv/bin/python -c \"{HEALTH_CODE}\"", 20)
             try: data = json.loads(output) if ok else {"last_error": output}
             except json.JSONDecodeError: data = {"last_error": output}
             self.events.put(("health", label, bool(data.get("ok")), data))
-        threading.Thread(target=lambda: list(ThreadPoolExecutor(max_workers=16).map(lambda item: one(*item), entries)), daemon=True).start()
+        def scan() -> None:
+            with ThreadPoolExecutor(max_workers=min(16, len(entries))) as pool:
+                list(pool.map(lambda item: one(*item), entries))
+            self.events.put(("scan_done", "", True, {}))
+        threading.Thread(target=scan, daemon=True).start()
+
+    def _schedule_refresh(self) -> None:
+        if self.auto.get() and self.next_refresh is None:
+            self.next_refresh = self.root.after(5000, self._scheduled_refresh)
+
+    def _scheduled_refresh(self) -> None:
+        self.next_refresh = None
+        self.refresh()
 
     def _drain(self) -> None:
+        changed = False
         try:
             while True:
                 kind, label, ok, data = self.events.get_nowait()
                 if kind == "setup": self.status.set(f"{label}: {'OK' if ok else 'lỗi'}")
-                else: self.rows[label] = data; self.render()
+                elif kind == "health":
+                    self.rows[label] = data
+                    changed = True
+                elif kind == "scan_done":
+                    self.refreshing = False
+                    self.status.set(f"Đã quét {len(self.rows)} VPS")
+                    self._schedule_refresh()
         except queue.Empty: pass
+        if changed:
+            self.render()
         self.root.after(200, self._drain)
 
     def render(self) -> None:
@@ -132,7 +158,6 @@ class App:
             pending = ", ".join(account for chunk in details for account in chunk.get("pending_accounts", [])[:5])
             recent = ", ".join(data.get("recent_checked_accounts") or ["—"])
             self.table.insert("", "end", iid=label, values=(label, "Online" if data.get("ok") else "Offline", f"{data.get('chunks_claimed',0)}/{data.get('chunks_completed',0)}", f"{data.get('accounts_claimed',0)}/{data.get('accounts_completed',0)}", data.get("chunks_active",0), pending[:150] or "—", recent[:220], str(data.get("last_error", ""))[:200]))
-        if self.auto.get(): self.root.after(5000, self.refresh)
 
     def show_detail(self, _event: Any) -> None:
         selected = self.table.selection()
