@@ -37,7 +37,6 @@ DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
-MAX_JOB_ACCOUNTS = 50_000
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
 MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
@@ -657,8 +656,6 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
         result.append(ParsedAccount(account, password))
-        if len(result) >= MAX_CHUNK_LIMIT * 10000:
-            raise ValueError("Quá nhiều tài khoản trong một lần gửi")
     if not result:
         raise ValueError("Danh sách trống hoặc không có dòng hợp lệ")
     return result
@@ -679,7 +676,7 @@ _PAGE_HTML = """
 :root{color-scheme:dark;font-family:'Segoe UI',system-ui,sans-serif}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:#0e1117;color:#e6edf3;min-height:100vh;padding:18px}
-.container{max-width:900px;margin:0 auto}
+.container{max-width:1240px;margin:0 auto}
 header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
 header h1{font-size:22px;color:#58a6ff}
 header .badge{background:#238636;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700}
@@ -695,7 +692,7 @@ btn,button,.btn{padding:10px 20px;border:0;border-radius:8px;font-weight:700;cur
 .btn-primary{background:#238636;color:#fff}.btn-primary:hover{background:#2ea043}
 .btn-primary:disabled{opacity:.5;cursor:wait}
 .btn-sm{padding:6px 14px;font-size:12px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(105px,1fr));gap:10px;margin:12px 0}
 .stat{background:#0d1117;border-radius:8px;padding:12px;text-align:center}
 .stat .num{font-size:28px;font-weight:800;color:#58a6ff}
 .stat .lbl{font-size:11px;color:#8b949e;margin-top:2px}
@@ -712,9 +709,48 @@ tr:hover{background:#1c2128}
 .tag-run{background:#d2992233;color:#d29922}
 .empty{color:#484f58;text-align:center;padding:30px}
 #toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:99;box-shadow:0 4px 20px #0006}
-.jobs-list{max-height:500px;overflow-y:auto}
+.workspace{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(0,1.55fr);gap:16px;align-items:start;margin-bottom:16px}
+.workspace>.card{margin:0;min-width:0}
+.workspace:not(.detail-open) .jobs-card{grid-column:1/-1}
+.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
+.section-head h2{margin:0}
+.section-subtitle{font-size:12px;color:#8b949e;margin-top:4px}
+.jobs-list{max-height:690px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;padding-right:3px}
+.job-item{background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:13px;cursor:pointer;transition:border-color .15s,background .15s,transform .15s}
+.job-item:hover{background:#161f2b;border-color:#58a6ff;transform:translateY(-1px)}
+.job-item.active{border-color:#2f81f7;background:#13233a;box-shadow:inset 3px 0 #2f81f7}
+.job-head,.job-meta,.job-counts,.progress-label{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.job-id{font-size:15px;font-weight:800;color:#e6edf3}
+.job-meta{font-size:11px;color:#8b949e;margin-top:6px;flex-wrap:wrap}
+.progress-track{height:7px;background:#21262d;border-radius:99px;overflow:hidden;margin:11px 0 5px}
+.progress-fill{height:100%;background:linear-gradient(90deg,#1f6feb,#56d364);border-radius:inherit;transition:width .25s}
+.progress-label{font-size:11px;color:#8b949e}
+.job-counts{justify-content:flex-start;flex-wrap:wrap;margin-top:10px;font-size:11px}
+.job-count{background:#161b22;border:1px solid #30363d;border-radius:99px;padding:3px 8px;color:#8b949e}
+.job-count.ok{color:#56d364}.job-count.fail{color:#ff7b72}.job-count.pending{color:#d29922}
+.detail-card{position:sticky;top:18px}
+.detail-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:8px}
+.detail-head h2{font-size:18px;margin:2px 0 5px}
+.detail-kicker{color:#58a6ff;font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
+.detail-meta{font-size:12px;color:#8b949e;display:flex;gap:10px;flex-wrap:wrap}
+.icon-btn{background:#21262d;color:#8b949e;padding:5px 9px;font-size:16px;line-height:1}
+.detail-actions{margin:12px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.detail-progress{background:#0d1117;border:1px solid #30363d;border-radius:9px;padding:11px 12px;margin:10px 0}
+.results-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:14px 0 8px}
+.results-head h3{font-size:13px;color:#c9d1d9}
+.results-head span{font-size:11px;color:#8b949e}
+.table-scroll{overflow:auto;border:1px solid #30363d;border-radius:9px;max-height:390px}
+.table-scroll table{min-width:700px;margin:0}
+.table-scroll th{position:sticky;top:0;background:#161b22;z-index:1}
+.pagination{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px}
+.pagination span{font-size:12px;color:#8b949e}
 .retention-notice{background:#d2992230;border:1px solid #d29922;border-radius:10px;padding:12px 14px;margin-bottom:16px;color:#f0d68a;font-size:13px;line-height:1.5}
 .retention-notice strong{color:#ffd66b}
+@media(max-width:900px){
+  body{padding:10px}.card{padding:15px}.workspace{grid-template-columns:1fr}.workspace .jobs-card{grid-column:1}
+  .detail-card{position:static}.jobs-list{max-height:520px}header{flex-wrap:wrap}.stat .num{font-size:23px}
+}
+@media(max-width:560px){.jobs-list{max-height:none}.detail-actions .btn{flex:1}.section-head{align-items:flex-start}.detail-meta{gap:5px}.stats{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
@@ -729,7 +765,6 @@ tr:hover{background:#1c2128}
 
 <div class="retention-notice">
   <strong>⚠️ Chính sách lưu dữ liệu:</strong> Dữ liệu job và kết quả chỉ được lưu tối đa <strong>2 ngày</strong> (hôm nay và hôm qua). Dữ liệu cũ sẽ được dọn tự động; sau khi đã xóa, <strong>kể cả admin cũng không thể khôi phục</strong>.
-  <br><strong>Giới hạn:</strong> Mỗi đơn kiểm tra tối đa <strong>50.000 tài khoản</strong>.
   <br>Một số tài khoản đặc biệt có thể check rất lâu đến cuối, thậm chí tool không trả kết quả. Hãy dừng đơn đó và tạo đơn mới để tránh tốn thời gian.
   <br>Tool check không sử dụng proxy, chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau check mà lpass, Admin không chịu trách nhiệm.
 </div>
@@ -753,23 +788,36 @@ tr:hover{background:#1c2128}
   </div>
 </div>
 
-<div class="card">
-  <h2>📊 Danh sách Jobs của bạn</h2>
-  <div style="margin-bottom:10px"><button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Refresh</button></div>
-  <div id="jobsList" class="jobs-list"><div class="empty">Chưa có job nào</div></div>
-</div>
-
-<div class="card" id="detailCard" style="display:none">
-  <h2>📝 Chi tiết Job #<span id="detailJobId"></span><span id="detailDuration" style="font-size:14px;font-weight:600;color:#8b949e;margin-left:10px"></span> <span id="detailOwner" style="font-size:12px;color:#8b949e"></span></h2>
-  <div class="stats" id="detailStats"></div>
-  <div style="margin:10px 0;display:flex;gap:8px">
-    <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
-    <button class="btn btn-sm" id="stopJobBtn" onclick="stopCurrentJob()" style="background:#da3633">⏹ Dừng job</button>
-    <button class="btn btn-sm btn-primary" onclick="exportTxt()" style="background:#1f6feb">📥 Xuất TXT</button>
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e">LV đạt từ <input id="exportMinLevel" type="number" min="1" max="1000" value="12" style="width:58px;padding:6px"></label>
-    <button class="btn btn-sm btn-primary" onclick="exportXlsx()" style="background:#8250df">📊 Xuất Excel</button>
+<div class="workspace" id="jobsWorkspace">
+  <div class="card jobs-card">
+    <div class="section-head">
+      <div><h2>📊 Jobs của bạn</h2><div class="section-subtitle">Chọn một job để xem kết quả và tiến độ</div></div>
+      <button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Làm mới</button>
+    </div>
+    <div id="jobsList" class="jobs-list"><div class="empty">Đang tải...</div></div>
   </div>
-  <div id="detailRows"><div class="empty">Đang tải...</div></div>
+
+  <div class="card detail-card" id="detailCard" style="display:none">
+    <div class="detail-head">
+      <div>
+        <div class="detail-kicker">Chi tiết Job #<span id="detailJobId"></span></div>
+        <h2 id="detailTitle">Kết quả kiểm tra</h2>
+        <div class="detail-meta"><span id="detailStatus"></span><span id="detailDuration"></span><span id="detailOwner"></span></div>
+      </div>
+      <button class="btn icon-btn" title="Đóng chi tiết" onclick="closeDetail()">×</button>
+    </div>
+    <div class="detail-progress" id="detailProgress"></div>
+    <div class="stats" id="detailStats"></div>
+    <div class="detail-actions">
+      <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Làm mới</button>
+      <button class="btn btn-sm" id="stopJobBtn" onclick="stopCurrentJob()" style="background:#da3633;color:#fff">⏹ Dừng</button>
+      <button class="btn btn-sm btn-primary" onclick="exportTxt()" style="background:#1f6feb">📥 TXT</button>
+      <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e">LV từ <input id="exportMinLevel" type="number" min="1" max="1000" value="12" style="width:58px;padding:6px"></label>
+      <button class="btn btn-sm btn-primary" onclick="exportXlsx()" style="background:#8250df">📊 Excel</button>
+    </div>
+    <div class="results-head"><h3>Danh sách kết quả</h3><span id="detailPageInfo"></span></div>
+    <div id="detailRows"><div class="empty">Đang tải...</div></div>
+  </div>
 </div>
 </div>
 
@@ -787,7 +835,10 @@ function getHeaders(){return {'Authorization':'Bearer '+TOKEN,'Content-Type':'ap
 let H=getHeaders();
 let currentJobId=null;
 let detailPage=1;
-const DETAIL_PAGE_SIZE=50;
+let detailTimer=null;
+let jobsCache=[];
+let jobsLoading=false;
+const DETAIL_PAGE_SIZE=100;
 
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
 
@@ -850,69 +901,122 @@ function formatJobDuration(start,end){
 }
 function updateJobDurations(){document.querySelectorAll('.job-duration').forEach(el=>{el.textContent=formatJobDuration(el.dataset.start,el.dataset.end);});}
 function jobDurationHtml(job){return '<span class="job-duration" data-start="'+Number(job.created_at||0)+'" data-end="'+Number(job.finished_at||0)+'"></span>';}
+function formatNumber(value){return Number(value||0).toLocaleString('vi-VN');}
+function formatDate(value){const d=new Date(Number(value||0)*1000);return Number.isNaN(d.getTime())?'Không rõ thời gian':d.toLocaleString('vi-VN',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});}
+function progressPercent(done,total){return total>0?Math.min(100,Math.max(0,Math.round(done*100/total))):0;}
+function esc(value){const chars={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};return String(value??'').replace(/[&<>"']/g,ch=>chars[ch]);}
+
+function renderJobs(){
+  const el=document.getElementById('jobsList');
+  if(!jobsCache.length){el.innerHTML='<div class="empty">Chưa có job nào</div>';return;}
+  el.innerHTML=jobsCache.map(j=>{
+    const id=Number(j.id),total=Number(j.total||0);
+    const processed=Math.min(total,Number(j.processed??((j.ok||0)+(j.fail||0)+(j.uncheckable||0))));
+    const percent=progressPercent(processed,total),isDone=j.status==='done';
+    const status=isDone?'<span class="tag tag-ok">Hoàn tất</span>':'<span class="tag tag-run">Đang chạy</span>';
+    const owner=j.owner_preview?' · Key '+esc(j.owner_preview):'';
+    return '<div class="job-item '+(currentJobId===id?'active':'')+'" role="button" tabindex="0" onclick="viewJob('+id+')" onkeydown="if(event.key===\\'Enter\\'||event.key===\\' \\'){event.preventDefault();viewJob('+id+')}">'+
+      '<div class="job-head"><span class="job-id">Job #'+id+'</span>'+status+'</div>'+
+      '<div class="job-meta"><span>'+esc(formatDate(j.created_at))+owner+'</span><span>⏱ '+jobDurationHtml(j)+'</span></div>'+
+      '<div class="progress-track"><div class="progress-fill" style="width:'+percent+'%"></div></div>'+
+      '<div class="progress-label"><span>'+formatNumber(processed)+' / '+formatNumber(total)+' tài khoản</span><strong>'+percent+'%</strong></div>'+
+      '<div class="job-counts"><span class="job-count ok">OK '+formatNumber(j.ok)+'</span><span class="job-count fail">Sai '+formatNumber(j.fail)+'</span><span class="job-count pending">Chưa thể '+formatNumber(j.uncheckable)+'</span></div>'+
+    '</div>';
+  }).join('');
+  updateJobDurations();
+}
 
 async function loadJobs(){
+  if(jobsLoading)return;
+  jobsLoading=true;
   const el=document.getElementById('jobsList');
   try{
     const d=await api('/api/jobs_list');
-    if(!d.ok||!d.jobs||d.jobs.length===0){el.innerHTML='<div class="empty">Chưa có job nào</div>';return}
-    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>Thời gian</th><th>OK</th><th>Sai pass</th><th>Chưa thể check</th><th></th></tr>';
-    d.jobs.forEach(j=>{
-      const st=j.status==='done'?'<span class="tag tag-ok">Xong</span>':'<span class="tag tag-run">Đang chạy</span>';
-      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td>'+jobDurationHtml(j)+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td><td style="color:#d29922">'+(j.uncheckable||0)+'</td>';
-      h+='<td><button class="btn btn-sm btn-primary" onclick="viewJob('+j.id+')">Xem</button></td></tr>'
-    });
-    el.innerHTML=h+'</table>';updateJobDurations();
-  }catch(e){el.innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
+    if(!d.ok)throw new Error(d.error||'Không tải được jobs');
+    jobsCache=Array.isArray(d.jobs)?d.jobs:[];
+    renderJobs();
+  }catch(e){if(!jobsCache.length)el.innerHTML='<div class="empty">Lỗi: '+esc(e.message)+'</div>';}
+  finally{jobsLoading=false;}
 }
 
 async function viewJob(id){
-  currentJobId=id;
+  currentJobId=Number(id);
   detailPage=1;
+  document.getElementById('jobsWorkspace').classList.add('detail-open');
   document.getElementById('detailCard').style.display='block';
   document.getElementById('detailJobId').textContent=id;
+  document.getElementById('detailRows').innerHTML='<div class="empty">Đang tải...</div>';
+  renderJobs();
+  if(window.matchMedia('(max-width:900px)').matches)document.getElementById('detailCard').scrollIntoView({behavior:'smooth',block:'start'});
   refreshDetail();
+}
+
+function closeDetail(){
+  currentJobId=null;detailPage=1;
+  if(detailTimer){clearTimeout(detailTimer);detailTimer=null;}
+  document.getElementById('jobsWorkspace').classList.remove('detail-open');
+  document.getElementById('detailCard').style.display='none';
+  renderJobs();
+}
+
+function scheduleDetail(id){
+  if(detailTimer)clearTimeout(detailTimer);
+  detailTimer=setTimeout(()=>{if(currentJobId===id)refreshDetail();},5000);
 }
 
 async function refreshDetail(){
   if(!currentJobId)return;
   const id=currentJobId;
+  if(detailTimer){clearTimeout(detailTimer);detailTimer=null;}
   try{
-    const s=await api('/api/jobs/'+id);
-    if(!s.ok){document.getElementById('detailStats').innerHTML='<div class="empty">'+s.error+'</div>';return}
+    const [s,rd]=await Promise.all([
+      api('/api/jobs/'+id),
+      api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE)
+    ]);
+    if(id!==currentJobId)return;
+    if(!s.ok)throw new Error(s.error||'Không tải được chi tiết job');
     const c=s.chunks||{},r=s.results||{};
-    const stopBtn=document.getElementById('stopJobBtn');stopBtn.style.display=s.status==='open'?'inline-block':'none';
+    const total=Number(s.total||0),processed=Math.min(total,Number(r.count||0)),percent=progressPercent(processed,total);
+    const stopBtn=document.getElementById('stopJobBtn');stopBtn.style.display=s.status==='open'?'inline-block':'none';stopBtn.disabled=false;
+    document.getElementById('detailStatus').innerHTML=s.status==='open'?'<span class="tag tag-run">Đang chạy</span>':'<span class="tag tag-ok">Hoàn tất</span>';
+    document.getElementById('detailOwner').textContent=s.owner_preview?('Key '+s.owner_preview):'';
     const duration=document.getElementById('detailDuration');
+    duration.className='job-duration';
     duration.dataset.start=Number(s.created_at||0);duration.dataset.end=Number(s.finished_at||0);
-    duration.textContent=' · ⏱ '+formatJobDuration(duration.dataset.start,duration.dataset.end);
+    document.getElementById('detailProgress').innerHTML='<div class="progress-label"><span>Đã xử lý <strong>'+formatNumber(processed)+' / '+formatNumber(total)+'</strong> tài khoản</span><strong>'+percent+'%</strong></div><div class="progress-track"><div class="progress-fill" style="width:'+percent+'%"></div></div>';
     document.getElementById('detailStats').innerHTML=
-      '<div class="stat"><div class="num">'+s.total+'</div><div class="lbl">Tổng</div></div>'+
+      '<div class="stat"><div class="num">'+formatNumber(total)+'</div><div class="lbl">Tổng tài khoản</div></div>'+
+      '<div class="stat"><div class="num">'+formatNumber(processed)+'</div><div class="lbl">Đã xử lý</div></div>'+
       '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
       '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Sai pass</div></div>'+
       '<div class="stat pending"><div class="num">'+(r.uncheckable||0)+'</div><div class="lbl">Chưa thể check</div></div>'+
-      '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
-      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
+      '<div class="stat"><div class="num">'+formatNumber(c.pending)+' / '+formatNumber(c.claimed)+'</div><div class="lbl">Chunk chờ / đang chạy</div></div>';
     updateJobDurations();
-
-    const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
-    if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
+    if(!rd.ok)throw new Error(rd.error||'Không tải được kết quả');
+    const rows=Array.isArray(rd.rows)?rd.rows:[];
+    document.getElementById('detailPageInfo').textContent=formatNumber(rd.total)+' kết quả · Trang '+rd.page+'/'+(rd.total_pages||1);
+    if(!rows.length){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả, hệ thống sẽ tự cập nhật</div>';if(s.status==='open')scheduleDetail(id);return;}
     let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Trạng thái tài khoản</th></tr>';
-    rd.rows.forEach(r=>{
-      const tag=r.status==='OK'?'tag-ok':(r.status==='CHƯA THỂ CHECK'?'tag-run':'tag-fail');
-      h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
-      h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+(r.player_status||'')+'</td></tr>'
+    rows.forEach(row=>{
+      const tag=row.status==='OK'?'tag-ok':(row.status==='CHƯA THỂ CHECK'?'tag-run':'tag-fail');
+      h+='<tr><td>'+esc(row.stt??'')+'</td><td><b>'+esc(row.account||'')+'</b></td><td><span class="tag '+tag+'">'+esc(row.status||'')+'</span></td>';
+      h+='<td>'+esc(row.uid||'')+'</td><td>'+esc(row.name||'')+'</td><td>'+esc(row.level||'')+'</td><td>'+esc(row.player_status||'')+'</td></tr>';
     });
     const totalPages=rd.total_pages||1;
-    h+='</table>';
+    h='<div class="table-scroll">'+h+'</table></div>';
     if(totalPages>1){
-      h+='<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px">'+
+      h+='<div class="pagination">'+
         '<button class="btn btn-sm btn-primary" '+(rd.page<=1?'disabled':'')+' onclick="goDetailPage('+(rd.page-1)+')">← Trước</button>'+
         '<span style="font-size:12px;color:#8b949e">Trang '+rd.page+'/'+totalPages+' · '+rd.total+' kết quả</span>'+
         '<button class="btn btn-sm btn-primary" '+(rd.page>=totalPages?'disabled':'')+' onclick="goDetailPage('+(rd.page+1)+')">Sau →</button></div>';
     }
     document.getElementById('detailRows').innerHTML=h;
-    if(s.status==='open')setTimeout(refreshDetail,5000)
-  }catch(e){document.getElementById('detailRows').innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
+    if(s.status==='open')scheduleDetail(id);
+  }catch(e){
+    if(id!==currentJobId)return;
+    document.getElementById('detailRows').innerHTML='<div class="empty">Lỗi: '+esc(e.message)+'</div>';
+    scheduleDetail(id);
+  }
 }
 function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
 
@@ -925,7 +1029,7 @@ async function clearAllData(){
   try{
     const d=await api('/api/admin/clear_all',{method:'POST',body:'{}'});
     if(!d.ok){toast('❌ '+(d.error||'Không thể xóa dữ liệu'));return;}
-    currentJobId=null;document.getElementById('detailCard').style.display='none';
+    closeDetail();
     document.getElementById('jobsList').innerHTML='<div class="empty">Chưa có job nào</div>';
     toast('✅ Đã xóa '+(d.jobs||0)+' job và '+(d.results||0)+' kết quả');
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;}
@@ -1390,6 +1494,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "finished_at": row[5],
                 "total": row[2],
                 "status": row[4],
+                "processed": results_count,
                 "ok": ok_count,
                 "fail": fail_count,
                 "uncheckable": uncheckable_count,
@@ -1418,12 +1523,6 @@ class MasterHandler(BaseHTTPRequestHandler):
             parsed = parse_accounts(joined)
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
-            return
-        if len(parsed) > MAX_JOB_ACCOUNTS:
-            self._json(HTTPStatus.BAD_REQUEST, {
-                "ok": False,
-                "error": f"Mỗi job tối đa {MAX_JOB_ACCOUNTS:,} tài khoản. Danh sách hiện có {len(parsed):,} tài khoản.",
-            })
             return
         # Cố định 15 account/chunk; không nhận cấu hình từ client.
         chunk_size = DEFAULT_CHUNK_LIMIT
