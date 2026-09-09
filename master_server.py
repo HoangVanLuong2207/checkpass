@@ -729,6 +729,9 @@ tr:hover{background:#1c2128}
 
 <div class="retention-notice">
   <strong>⚠️ Chính sách lưu dữ liệu:</strong> Dữ liệu job và kết quả chỉ được lưu tối đa <strong>2 ngày</strong> (hôm nay và hôm qua). Dữ liệu cũ sẽ được dọn tự động; sau khi đã xóa, <strong>kể cả admin cũng không thể khôi phục</strong>.
+  <br><strong>Giới hạn:</strong> Mỗi đơn kiểm tra tối đa <strong>50.000 tài khoản</strong>.
+  <br>Một số tài khoản đặc biệt có thể check rất lâu đến cuối, thậm chí tool không trả kết quả. Hãy dừng đơn đó và tạo đơn mới để tránh tốn thời gian.
+  <br>Tool check không sử dụng proxy, chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau check mà lpass, Admin không chịu trách nhiệm.
 </div>
 
 <div class="card" id="keyCard" style="border-color:#1f6feb">
