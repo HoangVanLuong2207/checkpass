@@ -573,9 +573,13 @@ class PostgreSQLStore:
     @staticmethod
     def _sql(sql: str) -> str:
         # Master dùng SQLite-style placeholders. Chuyển tại đây để các handler dùng chung.
-        return sql.replace("?", "%s").replace(
-            "json_extract(row_json,'$.status')", "(row_json::jsonb ->> 'status')"
-        )
+        prepared = sql.replace("?", "%s")
+        for field in ("status", "result_type", "player_status", "level"):
+            prepared = prepared.replace(
+                f"json_extract(row_json,'$.{field}')",
+                f"(row_json::jsonb ->> '{field}')",
+            )
+        return prepared
 
     def _init_tables(self) -> None:
         with self._lock:
@@ -1658,36 +1662,80 @@ class MasterHandler(BaseHTTPRequestHandler):
             per_page = int(query.get("per_page", ["50"])[0])
         except (TypeError, ValueError):
             per_page = 50
+        try:
+            min_level = max(1, min(1000, int(query.get("min_level", ["12"])[0])))
+        except (TypeError, ValueError):
+            min_level = 12
+        result_filter = str(query.get("filter", ["all"])[0] or "all").upper()
+        if result_filter not in {"ALL", "OK", "NOT_MET", "LOCKED", "FAIL", "PENDING"}:
+            result_filter = "ALL"
+
         # Giới hạn kích thước trang để một request chi tiết không tải quá nhiều dữ liệu.
         per_page = max(1, min(per_page, 100))
-        total_row = store.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))
-        total = int(total_row[0]) if total_row else 0
+
+        status_sql = "COALESCE(json_extract(row_json,'$.status'),'')"
+        result_type_sql = "LOWER(COALESCE(json_extract(row_json,'$.result_type'),''))"
+        player_status_sql = "LOWER(COALESCE(json_extract(row_json,'$.player_status'),''))"
+        level_text_sql = "COALESCE(json_extract(row_json,'$.level'),'')"
+        if isinstance(store, PostgreSQLStore):
+            numeric_level_sql = (
+                f"CASE WHEN {level_text_sql} ~ '^[0-9]+$' "
+                f"THEN CAST({level_text_sql} AS INTEGER) ELSE 0 END"
+            )
+        else:
+            numeric_level_sql = f"CAST({level_text_sql} AS INTEGER)"
+        category_sql = (
+            "CASE "
+            f"WHEN {status_sql}='CHƯA THỂ CHECK' OR {result_type_sql}='chưa thể check' THEN 'PENDING' "
+            f"WHEN UPPER({status_sql})!='OK' OR {result_type_sql}='sai pass' THEN 'FAIL' "
+            f"WHEN {player_status_sql} LIKE '%khóa%' OR {player_status_sql} LIKE '%ban%' "
+            f"OR {player_status_sql} LIKE '%cấm%' THEN 'LOCKED' "
+            f"WHEN {numeric_level_sql}>=? THEN 'OK' "
+            "ELSE 'NOT_MET' END"
+        )
+
+        category_rows = store.fetch(
+            f"SELECT category, COUNT(*) FROM ("
+            f"SELECT {category_sql} AS category FROM results WHERE job_id=?"
+            ") categorized GROUP BY category",
+            (min_level, job_id),
+        )
+        category_counts = {"OK": 0, "NOT_MET": 0, "LOCKED": 0, "FAIL": 0, "PENDING": 0}
+        for category, count in category_rows:
+            key = str(category or "")
+            if key in category_counts:
+                category_counts[key] = int(count or 0)
+        total_all = sum(category_counts.values())
+
+        filter_sql = ""
+        filter_args: tuple[Any, ...] = ()
+        if result_filter != "ALL":
+            filter_sql = f" AND ({category_sql})=?"
+            filter_args = (min_level, result_filter)
+        total = total_all if result_filter == "ALL" else category_counts[result_filter]
         total_pages = max(1, (total + per_page - 1) // per_page)
         page = min(page, total_pages)
         offset = (page - 1) * per_page
         rows_raw = store.fetch(
-            "SELECT chunk_id, row_json FROM results WHERE job_id=? ORDER BY id LIMIT ? OFFSET ?",
-            (job_id, per_page, offset),
+            "SELECT r.chunk_id, r.row_json, c.account FROM results r "
+            "JOIN chunks c ON c.id=r.chunk_id "
+            f"WHERE r.job_id=?{filter_sql} ORDER BY r.id LIMIT ? OFFSET ?",
+            (job_id, *filter_args, per_page, offset),
         )
-        chunks_raw = store.fetch(
-            "SELECT id, account FROM chunks WHERE job_id=?", (job_id,)
-        )
-        credentials_by_chunk: dict[int, list[str]] = {}
-        for chunk_id_raw, credentials_json in chunks_raw:
-            try:
-                credentials = json.loads(credentials_json)
-            except (TypeError, json.JSONDecodeError):
-                credentials = []
-            credentials_by_chunk[int(chunk_id_raw)] = credentials if isinstance(credentials, list) else []
 
         rows = []
-        for chunk_id_res, item_json in rows_raw:
+        for _chunk_id_res, item_json, credentials_json in rows_raw:
             row = json.loads(item_json)
             try:
                 row_index = int(str(row.get("stt") or "0")) - 1
             except (TypeError, ValueError):
                 row_index = -1
-            creds = credentials_by_chunk.get(int(chunk_id_res), [])
+            try:
+                creds = json.loads(credentials_json)
+            except (TypeError, json.JSONDecodeError):
+                creds = []
+            if not isinstance(creds, list):
+                creds = []
             if 0 <= row_index < len(creds):
                 row["full_credential"] = str(creds[row_index])
             else:
@@ -1700,7 +1748,11 @@ class MasterHandler(BaseHTTPRequestHandler):
             "page": page,
             "per_page": per_page,
             "total": total,
+            "total_all": total_all,
             "total_pages": total_pages,
+            "filter": result_filter,
+            "min_level": min_level,
+            "category_counts": category_counts,
         })
 
     def _handle_job_export(self, job_id: int, auth: dict[str, Any] | None = None) -> None:

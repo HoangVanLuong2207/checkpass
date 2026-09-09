@@ -1413,7 +1413,7 @@ table.data-table tbody tr:hover {
           </button>
           <div class="level-input-wrap" title="Lọc level tối thiểu (tự động cập nhật bảng & xuất Excel)">
             <span>LV từ</span>
-            <input id="exportMinLevel" type="number" min="1" max="1000" value="12" oninput="renderFilteredRows()">
+            <input id="exportMinLevel" type="number" min="1" max="1000" value="12" oninput="applyLevelFilter()">
           </div>
           <button class="btn btn-purple btn-sm" onclick="exportXlsx()">
             <i class="fa-solid fa-file-excel"></i> Xuất Excel
@@ -1530,11 +1530,13 @@ function getHeaders() {
 let currentJobId = null;
 let detailPage = 1;
 let detailTimer = null;
+let detailRequestSeq = 0;
 let jobsCache = [];
 let jobsLoading = false;
 let currentRawRows = [];
 let currentFilter = 'all';
 let currentSearch = '';
+let levelFilterTimer = null;
 const DETAIL_PAGE_SIZE = 100;
 
 function toast(msg, ms = 3200, type = 'info') {
@@ -1944,6 +1946,7 @@ async function viewJob(id) {
 
 function closeDetail() {
   currentJobId = null;
+  detailRequestSeq++;
   detailPage = 1;
   if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
   document.getElementById('jobsWorkspace').classList.remove('detail-open');
@@ -1963,7 +1966,7 @@ function getRowCategory(row, minLevel = 12) {
   const ps = String(row.player_status || '').toLowerCase();
   const rt = String(row.result_type || '').toLowerCase();
   const lvStr = String(row.level || '').trim();
-  const lvNum = parseInt(lvStr, 10);
+  const lvNum = /^\d+$/.test(lvStr) ? Number(lvStr) : NaN;
 
   if (st === 'CHƯA THỂ CHECK' || rt === 'chưa thể check') {
     return 'PENDING';
@@ -1980,13 +1983,16 @@ function getRowCategory(row, minLevel = 12) {
   return 'NOT_MET';
 }
 
-function updateFilterTabCounts(rows, minLevel) {
-  const counts = { all: rows.length, OK: 0, NOT_MET: 0, LOCKED: 0, FAIL: 0, PENDING: 0 };
-  rows.forEach(r => {
-    const cat = getRowCategory(r, minLevel);
-    if (counts[cat] !== undefined) counts[cat]++;
-  });
-  for (const k in counts) {
+function updateFilterTabCounts(categoryCounts, totalAll) {
+  const counts = {
+    all: Number(totalAll || 0),
+    OK: Number(categoryCounts?.OK || 0),
+    NOT_MET: Number(categoryCounts?.NOT_MET || 0),
+    LOCKED: Number(categoryCounts?.LOCKED || 0),
+    FAIL: Number(categoryCounts?.FAIL || 0),
+    PENDING: Number(categoryCounts?.PENDING || 0)
+  };
+  for (const k of Object.keys(counts)) {
     const el = document.getElementById('count_' + k);
     if (el) el.textContent = '(' + formatNumber(counts[k]) + ')';
   }
@@ -1994,10 +2000,17 @@ function updateFilterTabCounts(rows, minLevel) {
 
 function setResultFilter(filter) {
   currentFilter = filter;
+  detailPage = 1;
   document.querySelectorAll('.filter-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.filter === filter);
   });
-  renderFilteredRows();
+  refreshDetail();
+}
+
+function applyLevelFilter() {
+  detailPage = 1;
+  if (levelFilterTimer) clearTimeout(levelFilterTimer);
+  levelFilterTimer = setTimeout(refreshDetail, 350);
 }
 
 function filterCurrentRows() {
@@ -2007,12 +2020,7 @@ function filterCurrentRows() {
 
 function renderFilteredRows() {
   const minLevel = parseInt(document.getElementById('exportMinLevel')?.value, 10) || 12;
-  updateFilterTabCounts(currentRawRows, minLevel);
-
   let rows = currentRawRows;
-  if (currentFilter !== 'all') {
-    rows = rows.filter(r => getRowCategory(r, minLevel) === currentFilter);
-  }
   if (currentSearch) {
     rows = rows.filter(r => {
       const acc = String(r.account || '').toLowerCase();
@@ -2091,16 +2099,22 @@ function renderFilteredRows() {
 async function refreshDetail() {
   if (!currentJobId) return;
   const id = currentJobId;
+  const requestSeq = ++detailRequestSeq;
   if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
   const icon = document.getElementById('detailRefreshIcon');
   if (icon) icon.className = 'fa-solid fa-rotate fa-spin-fast';
+  const minLevel = Math.max(1, Math.min(1000, parseInt(document.getElementById('exportMinLevel')?.value, 10) || 12));
+  const rowsUrl = '/api/jobs/' + id + '/rows?page=' + detailPage +
+    '&per_page=' + DETAIL_PAGE_SIZE +
+    '&filter=' + encodeURIComponent(currentFilter) +
+    '&min_level=' + minLevel;
 
   try {
     const [s, rd] = await Promise.all([
       api('/api/jobs/' + id),
-      api('/api/jobs/' + id + '/rows?page=' + detailPage + '&per_page=' + DETAIL_PAGE_SIZE)
+      api(rowsUrl)
     ]);
-    if (id !== currentJobId) return;
+    if (id !== currentJobId || requestSeq !== detailRequestSeq) return;
     if (!s.ok) throw new Error(s.error || 'Không tải được chi tiết job');
 
     const c = s.chunks || {};
@@ -2145,6 +2159,7 @@ async function refreshDetail() {
 
     if (!rd.ok) throw new Error(rd.error || 'Không tải được kết quả');
     currentRawRows = Array.isArray(rd.rows) ? rd.rows : [];
+    updateFilterTabCounts(rd.category_counts || {}, rd.total_all);
 
     renderFilteredRows();
 
@@ -2163,7 +2178,7 @@ async function refreshDetail() {
 
     if (s.status === 'open') scheduleDetail(id);
   } catch(e) {
-    if (id !== currentJobId) return;
+    if (id !== currentJobId || requestSeq !== detailRequestSeq) return;
     document.getElementById('detailRows').innerHTML = '<div class="empty-state"><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger)"></i><br>Lỗi: ' + esc(e.message) + '</div>';
     scheduleDetail(id);
   } finally {
