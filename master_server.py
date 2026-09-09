@@ -1667,7 +1667,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             min_level = 12
         result_filter = str(query.get("filter", ["all"])[0] or "all").upper()
-        if result_filter not in {"ALL", "OK", "NOT_MET", "LOCKED", "FAIL", "PENDING"}:
+        if result_filter not in {"ALL", "OK", "NOT_MET", "CTNV", "LOCKED", "FAIL", "PENDING"}:
             result_filter = "ALL"
 
         # Giới hạn kích thước trang để một request chi tiết không tải quá nhiều dữ liệu.
@@ -1693,6 +1693,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             f"WHEN {player_status_sql} LIKE '{like_any}khóa{like_any}' "
             f"OR {player_status_sql} LIKE '{like_any}ban{like_any}' "
             f"OR {player_status_sql} LIKE '{like_any}cấm{like_any}' THEN 'LOCKED' "
+            f"WHEN LOWER({level_text_sql})='ctnv' "
+            f"OR {player_status_sql} LIKE '{like_any}chưa tạo nhân vật{like_any}' THEN 'CTNV' "
             f"WHEN {numeric_level_sql}>=? THEN 'OK' "
             "ELSE 'NOT_MET' END"
         )
@@ -1703,7 +1705,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             ") categorized GROUP BY category",
             (min_level, job_id),
         )
-        category_counts = {"OK": 0, "NOT_MET": 0, "LOCKED": 0, "FAIL": 0, "PENDING": 0}
+        category_counts = {"OK": 0, "NOT_MET": 0, "CTNV": 0, "LOCKED": 0, "FAIL": 0, "PENDING": 0}
         for category, count in category_rows:
             key = str(category or "")
             if key in category_counts:
