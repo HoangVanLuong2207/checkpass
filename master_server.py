@@ -680,6 +680,7 @@ body{background:#0e1117;color:#e6edf3;min-height:100vh;padding:18px}
 header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
 header h1{font-size:22px;color:#58a6ff}
 header .badge{background:#238636;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700}
+.header-actions{margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:16px}
 .card h2{font-size:16px;margin-bottom:12px;color:#79c0ff}
 textarea{width:100%;height:140px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px;font-family:monospace;font-size:13px;resize:vertical}
@@ -708,7 +709,16 @@ tr:hover{background:#1c2128}
 .tag-fail{background:#da363333;color:#ff7b72}
 .tag-run{background:#d2992233;color:#d29922}
 .empty{color:#484f58;text-align:center;padding:30px}
-#toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:99;box-shadow:0 4px 20px #0006}
+#toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:1100;box-shadow:0 4px 20px #0006}
+.modal{position:fixed;inset:0;background:#010409cc;backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:18px;z-index:1000}
+.modal.open{display:flex}
+.modal-panel{width:min(480px,100%);max-height:calc(100vh - 36px);overflow:auto;background:#161b22;border:1px solid #484f58;border-radius:14px;box-shadow:0 22px 70px #000b}
+.modal-panel.modal-wide{width:min(760px,100%)}
+.modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:18px 20px 12px;border-bottom:1px solid #30363d}
+.modal-head h2{font-size:17px;color:#79c0ff}.modal-head p{font-size:12px;color:#8b949e;margin-top:4px}
+.modal-body{padding:18px 20px}.modal-body textarea{height:min(46vh,420px)}
+.modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 20px 18px;flex-wrap:wrap}
+body.modal-open{overflow:hidden}
 .workspace{display:grid;grid-template-columns:minmax(340px,.9fr) minmax(0,1.55fr);gap:16px;align-items:start;margin-bottom:16px}
 .workspace>.card{margin:0;min-width:0}
 .workspace:not(.detail-open) .jobs-card{grid-column:1/-1}
@@ -748,9 +758,9 @@ tr:hover{background:#1c2128}
 .retention-notice strong{color:#ffd66b}
 @media(max-width:900px){
   body{padding:10px}.card{padding:15px}.workspace{grid-template-columns:1fr}.workspace .jobs-card{grid-column:1}
-  .detail-card{position:static}.jobs-list{max-height:520px}header{flex-wrap:wrap}.stat .num{font-size:23px}
+  .detail-card{position:static}.jobs-list{max-height:520px}header{flex-wrap:wrap}.header-actions{width:100%;margin-left:0;justify-content:flex-start}.stat .num{font-size:23px}
 }
-@media(max-width:560px){.jobs-list{max-height:none}.detail-actions .btn{flex:1}.section-head{align-items:flex-start}.detail-meta{gap:5px}.stats{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.jobs-list{max-height:none}.detail-actions .btn{flex:1}.section-head{align-items:flex-start}.detail-meta{gap:5px}.stats{grid-template-columns:repeat(2,1fr)}.modal{align-items:flex-end;padding:0}.modal-panel,.modal-panel.modal-wide{width:100%;max-height:94vh;border-radius:14px 14px 0 0}.modal-footer .btn{flex:1}.modal-body textarea{height:45vh}}
 </style>
 </head>
 <body>
@@ -758,9 +768,12 @@ tr:hover{background:#1c2128}
 <header>
   <h1>🎮 Garena Check Tool</h1>
   <span class="badge">MASTER</span>
-  <span id="ownerBadge" style="margin-left:auto;background:#1f6feb;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600"></span>
-  <button class="btn btn-sm" id="clearAllDataBtn" style="display:none;background:#da3633;color:#fff;margin-left:8px" onclick="clearAllData()">🗑️ Clear All Data</button>
-  <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-left:8px" onclick="changeKey()">🔑 Đổi Key</button>
+  <div class="header-actions">
+    <span id="ownerBadge" style="background:#1f6feb;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600"></span>
+    <button class="btn btn-sm btn-primary" onclick="openSubmitModal()">＋ Tạo job</button>
+    <button class="btn btn-sm" id="clearAllDataBtn" style="display:none;background:#da3633;color:#fff" onclick="clearAllData()">🗑️ Clear All Data</button>
+    <button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="changeKey()">🔑 Đổi Key</button>
+  </div>
 </header>
 
 <div class="retention-notice">
@@ -769,22 +782,38 @@ tr:hover{background:#1c2128}
   <br>Tool check không sử dụng proxy, chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau check mà lpass, Admin không chịu trách nhiệm.
 </div>
 
-<div class="card" id="keyCard" style="border-color:#1f6feb">
-  <h2>🔐 License Key (f:license-server)</h2>
-  <div class="row">
-    <div class="field" style="flex:2"><label>License Key</label><input type="password" id="keyInput" placeholder="Nhập key..."></div>
-    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" onclick="saveKey()">✅ Lưu & Kiểm tra</button></div>
+<div class="modal" id="keyModal" onclick="if(event.target===this)closeModal('keyModal')">
+  <div class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="keyModalTitle">
+    <div class="modal-head">
+      <div><h2 id="keyModalTitle">🔐 License Key</h2><p>Nhập key được cấp để truy cập jobs của bạn</p></div>
+      <button class="btn icon-btn" title="Đóng" onclick="closeModal('keyModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="field"><label>License Key</label><input type="password" id="keyInput" placeholder="Nhập key..." onkeydown="if(event.key==='Enter')saveKey()"></div>
+      <div id="keyStatus" style="margin-top:10px;font-size:13px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="closeModal('keyModal')">Hủy</button>
+      <button class="btn btn-primary" id="saveKeyBtn" onclick="saveKey()">✅ Lưu & Kiểm tra</button>
+    </div>
   </div>
-  <div id="keyStatus" style="margin-top:10px;font-size:13px"></div>
 </div>
 
-<div class="card">
-  <h2>📋 Gửi danh sách tài khoản</h2>
-  <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass  hoặc  user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
-  <div class="row" style="margin-top:12px">
-    <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
-    <div class="field"><label>&nbsp;</label><button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="document.getElementById('accFile').click()">📄 Nhập file</button></div>
-    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button></div>
+<div class="modal" id="submitModal" onclick="if(event.target===this)closeModal('submitModal')">
+  <div class="modal-panel modal-wide" role="dialog" aria-modal="true" aria-labelledby="submitModalTitle">
+    <div class="modal-head">
+      <div><h2 id="submitModalTitle">📋 Tạo job kiểm tra</h2><p>Dán danh sách hoặc nhập từ file TXT/CSV</p></div>
+      <button class="btn icon-btn" title="Đóng" onclick="closeModal('submitModal')">×</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass hoặc user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
+      <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-right:auto" onclick="document.getElementById('accFile').click()">📄 Nhập file</button>
+      <button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="closeModal('submitModal')">Hủy</button>
+      <button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button>
+    </div>
   </div>
 </div>
 
@@ -827,10 +856,6 @@ tr:hover{background:#1c2128}
 const keyFromUrl=new URLSearchParams(window.location.search).get('key');
 let TOKEN=keyFromUrl||localStorage.getItem('licenseKey')||localStorage.getItem('masterToken')||'';
 if(keyFromUrl){localStorage.setItem('licenseKey',TOKEN);history.replaceState(null,'',window.location.pathname);}
-if(!TOKEN){
-  TOKEN=prompt('Nhập License Key (key từ f:license-server):','')||'';
-  if(TOKEN) localStorage.setItem('licenseKey',TOKEN);
-}
 function getHeaders(){return {'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};}
 let H=getHeaders();
 let currentJobId=null;
@@ -841,6 +866,11 @@ let jobsLoading=false;
 const DETAIL_PAGE_SIZE=100;
 
 function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
+function openModal(id){const modal=document.getElementById(id);if(!modal)return;modal.classList.add('open');document.body.classList.add('modal-open');}
+function closeModal(id){const modal=document.getElementById(id);if(modal)modal.classList.remove('open');if(!document.querySelector('.modal.open'))document.body.classList.remove('modal-open');}
+function openKeyModal(){const input=document.getElementById('keyInput');if(input)input.value=TOKEN;openModal('keyModal');setTimeout(()=>{if(input){input.focus();input.select();}},50);}
+function openSubmitModal(){if(!TOKEN){toast('Vui lòng nhập License Key trước');openKeyModal();return;}openModal('submitModal');setTimeout(()=>document.getElementById('accInput').focus(),50);}
+document.addEventListener('keydown',event=>{if(event.key==='Escape'){document.querySelectorAll('.modal.open').forEach(modal=>closeModal(modal.id));}});
 
 async function api(path,opt={}){
   const r=await fetch(path,{headers:getHeaders(),...opt});
@@ -856,20 +886,26 @@ async function api(path,opt={}){
 function previewKey(k){if(!k) return '';if(k.length<=8) return k.slice(0,2)+'***'+k.slice(-1);return k.slice(0,4)+'***'+k.slice(-2);}
 function updateOwnerBadge(){const el=document.getElementById('ownerBadge');if(el) el.textContent=TOKEN?('Key: '+previewKey(TOKEN)):'Chưa có key';const inp=document.getElementById('keyInput');if(inp && !inp.value) inp.value=TOKEN;}
 function setClearAllButton(visible){const btn=document.getElementById('clearAllDataBtn');if(btn)btn.style.display=visible?'inline-block':'none';}
-function changeKey(){const k=prompt('Nhập License Key mới:','');if(k!==null){TOKEN=k.trim();localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();checkKey();loadJobs();toast('Đã đổi key');}}
-async function saveKey(){const inp=document.getElementById('keyInput');const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}TOKEN=k;localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();await checkKey();loadJobs();}
+function changeKey(){openKeyModal();}
+async function saveKey(){
+  const inp=document.getElementById('keyInput'),btn=document.getElementById('saveKeyBtn');
+  const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}
+  TOKEN=k;H=getHeaders();setClearAllButton(false);btn.disabled=true;
+  const valid=await checkKey();btn.disabled=false;
+  if(valid){localStorage.setItem('licenseKey',TOKEN);updateOwnerBadge();closeModal('keyModal');loadJobs();toast('✅ Đã lưu key');}
+}
 async function checkKey(){
   const st=document.getElementById('keyStatus');if(!st) return;
-  if(!TOKEN){setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return;}
+  if(!TOKEN){setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return false;}
   st.innerHTML='Đang kiểm tra...';
   try{
     const r=await fetch('/api/verify?token='+encodeURIComponent(TOKEN),{headers:getHeaders()});
     const j=await r.json();
-    if(j.valid||j.ok){setClearAllButton(j.is_admin===true);st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';}
-    else{setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';}
-  }catch(e){setClearAllButton(false);st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
+    if(j.valid||j.ok){setClearAllButton(j.is_admin===true);st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';return true;}
+    setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';return false;
+  }catch(e){setClearAllButton(false);st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';return false;}
 }
-updateOwnerBadge();checkKey();
+updateOwnerBadge();if(TOKEN)checkKey();
 
 function importAccountsFile(){
   const input=document.getElementById('accFile'),file=input&&input.files&&input.files[0];
@@ -887,7 +923,7 @@ async function sendJob(){
   const btn=document.getElementById('btnSend');btn.disabled=true;btn.textContent='⏳ Đang gửi...';
   try{
     const d=await api('/api/jobs',{method:'POST',body:JSON.stringify({text})});
-    if(d.ok){toast('✅ Tạo Job #'+d.job_id+' ('+d.total+' acc)');document.getElementById('accInput').value='';loadJobs();viewJob(d.job_id)}
+    if(d.ok){toast('✅ Tạo Job #'+d.job_id+' ('+d.total+' acc)');document.getElementById('accInput').value='';closeModal('submitModal');loadJobs();viewJob(d.job_id)}
     else toast('❌ '+d.error)
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;btn.textContent='🚀 Gửi check'}
 }
@@ -927,6 +963,7 @@ function renderJobs(){
 }
 
 async function loadJobs(){
+  if(!TOKEN)return;
   if(jobsLoading)return;
   jobsLoading=true;
   const el=document.getElementById('jobsList');
@@ -1035,7 +1072,8 @@ async function clearAllData(){
   }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;}
 }
 
-loadJobs();setInterval(loadJobs,15000);setInterval(updateJobDurations,1000);
+if(TOKEN)loadJobs();else openKeyModal();
+setInterval(loadJobs,15000);setInterval(updateJobDurations,1000);
 </script>
 </body>
 </html>
