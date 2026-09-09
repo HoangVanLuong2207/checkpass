@@ -65,13 +65,12 @@ class Monitor:
         ttk.Button(bar, text="Quét ngay", command=self.scan).pack(side="left")
         ttk.Checkbutton(bar, text="Tự quét 15 giây", variable=self.auto).pack(side="left", padx=12)
         ttk.Label(bar, textvariable=self.status).pack(side="right")
-        columns = ("service", "state", "chunks", "accounts", "active", "pending", "recent", "error")
-        headings = ("Dịch vụ", "Trạng thái", "Chunk nhận/xong", "Acc nhận/xong", "Chunk chạy", "Acc còn lại", "Acc vừa check", "Lỗi")
+        columns = ("service", "state", "chunks", "accounts", "active", "error")
+        headings = ("Dịch vụ", "Trạng thái", "Chunk nhận/xong", "Acc nhận/xong", "Chunk chạy", "Lỗi")
         self.table = ttk.Treeview(frame, columns=columns, show="headings", height=18)
         for column, heading in zip(columns, headings):
             self.table.heading(column, text=heading)
             self.table.column(column, width=150, anchor="w")
-        self.table.column("recent", width=250)
         self.table.column("error", width=290)
         self.table.pack(fill="both", expand=True, pady=8)
         self.table.bind("<<TreeviewSelect>>", self.show_detail)
@@ -133,24 +132,24 @@ class Monitor:
         for item in self.table.get_children():
             self.table.delete(item)
         for label, data in self.rows.items():
-            details = data.get("active_chunk_details") or []
-            pending = ", ".join(account for chunk in details for account in chunk.get("pending_accounts", [])[:5])
             error = str(data.get("_monitor_error") or data.get("last_error") or "")
             state = "Online" if data.get("ok") else ("Không phản hồi · dữ liệu cũ" if data else "Không phản hồi")
             values = (
                 label, state,
                 f"{data.get('chunks_claimed', 0)}/{data.get('chunks_completed', 0)}",
                 f"{data.get('accounts_claimed', 0)}/{data.get('accounts_completed', 0)}",
-                data.get("chunks_active", 0), pending[:150] or "—",
-                ", ".join(data.get("recent_checked_accounts") or ["—"])[:220], error[:200],
+                data.get("chunks_active", 0), error[:200],
             )
             self.table.insert("", "end", iid=label, values=values)
 
     def show_detail(self, _event: Any) -> None:
         selected = self.table.selection()
         if selected:
+            data = dict(self.rows.get(selected[0], {}))
+            for field in ("accounts_active", "accounts_processed_active", "active_chunk_details", "recent_checked_accounts"):
+                data.pop(field, None)
             self.detail.delete("1.0", "end")
-            self.detail.insert("1.0", json.dumps(self.rows.get(selected[0], {}), ensure_ascii=False, indent=2))
+            self.detail.insert("1.0", json.dumps(data, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
