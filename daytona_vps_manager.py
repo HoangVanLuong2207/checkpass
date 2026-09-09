@@ -86,7 +86,7 @@ class Monitor:
         bar = ttk.Frame(frame)
         bar.pack(fill="x")
         ttk.Button(bar, text="Quét ngay", command=self.scan).pack(side="left")
-        ttk.Checkbutton(bar, text="Tự quét 15 giây", variable=self.auto).pack(side="left", padx=12)
+        ttk.Checkbutton(bar, text="Tự quét 5 giây", variable=self.auto).pack(side="left", padx=12)
         ttk.Label(bar, textvariable=self.status).pack(side="right")
         columns = ("service", "state", "chunks", "accounts", "active", "error")
         headings = ("Dịch vụ", "Trạng thái", "Chunk nhận/xong", "Acc nhận/xong", "Chunk chạy", "Lỗi")
@@ -154,7 +154,7 @@ class Monitor:
 
     def schedule(self) -> None:
         if self.auto.get() and self.timer is None:
-            self.timer = self.root.after(15000, self.scheduled_scan)
+            self.timer = self.root.after(5000, self.scheduled_scan)
 
     def scheduled_scan(self) -> None:
         self.timer = None
