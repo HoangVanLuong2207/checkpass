@@ -10,8 +10,26 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from tkinter import ttk
 from typing import Any
+
+
+TARGETS_FILE = Path.home() / ".checkpass" / "render_health_urls.txt"
+DEFAULT_TARGETS = "[checkpass3] https://checkpass3-wt3z.onrender.com/\n"
+
+
+def load_saved_targets() -> str:
+    try:
+        saved = TARGETS_FILE.read_text(encoding="utf-8")
+        return saved if parse_targets(saved) else DEFAULT_TARGETS
+    except OSError:
+        return DEFAULT_TARGETS
+
+
+def save_targets(text: str) -> None:
+    TARGETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TARGETS_FILE.write_text(text.strip() + "\n", encoding="utf-8")
 
 
 def parse_targets(text: str) -> list[tuple[str, str]]:
@@ -64,7 +82,7 @@ class Monitor:
         ttk.Label(frame, text="Dán URL Render, mỗi dòng một dịch vụ:").pack(anchor="w")
         self.input = tk.Text(frame, height=8, font=("Consolas", 10))
         self.input.pack(fill="x", pady=(4, 8))
-        self.input.insert("1.0", "[checkpass3] https://checkpass3-wt3z.onrender.com/\n")
+        self.input.insert("1.0", load_saved_targets())
         bar = ttk.Frame(frame)
         bar.pack(fill="x")
         ttk.Button(bar, text="Quét ngay", command=self.scan).pack(side="left")
@@ -84,8 +102,14 @@ class Monitor:
         root.after(200, self.drain)
 
     def scan(self) -> None:
-        entries = parse_targets(self.input.get("1.0", "end"))
+        input_text = self.input.get("1.0", "end")
+        entries = parse_targets(input_text)
         if not entries or self.busy:
+            return
+        try:
+            save_targets(input_text)
+        except OSError as exc:
+            self.status.set(f"Không lưu được danh sách: {exc}")
             return
         self.busy = True
         active_labels = {label for label, _url in entries}
