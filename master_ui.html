@@ -959,6 +959,16 @@ table.data-table tbody tr:hover {
   color: #047857;
   border: 1px solid #A7F3D0;
 }
+.tag-badge.not-met {
+  background: #FEF9C3;
+  color: #A16207;
+  border: 1px solid #FDE047;
+}
+.tag-badge.locked {
+  background: #FFEDD5;
+  color: #C2410C;
+  border: 1px solid #FDBA74;
+}
 .tag-badge.fail {
   background: #FEE2E2;
   color: #B91C1C;
@@ -968,6 +978,12 @@ table.data-table tbody tr:hover {
   background: #FEF3C7;
   color: #B45309;
   border: 1px solid #FDE68A;
+}
+.filter-count {
+  font-size: 11px;
+  opacity: 0.85;
+  margin-left: 3px;
+  font-weight: 700;
 }
 
 .level-badge {
@@ -1395,9 +1411,9 @@ table.data-table tbody tr:hover {
           <button class="btn btn-info btn-sm" onclick="exportTxt()">
             <i class="fa-solid fa-file-arrow-down"></i> Xuất TXT
           </button>
-          <div class="level-input-wrap" title="Lọc level tối thiểu khi xuất Excel">
+          <div class="level-input-wrap" title="Lọc level tối thiểu (tự động cập nhật bảng & xuất Excel)">
             <span>LV từ</span>
-            <input id="exportMinLevel" type="number" min="1" max="1000" value="12">
+            <input id="exportMinLevel" type="number" min="1" max="1000" value="12" oninput="renderFilteredRows()">
           </div>
           <button class="btn btn-purple btn-sm" onclick="exportXlsx()">
             <i class="fa-solid fa-file-excel"></i> Xuất Excel
@@ -1408,10 +1424,12 @@ table.data-table tbody tr:hover {
       <!-- Results Toolbar -->
       <div class="results-toolbar">
         <div class="filter-tabs">
-          <div class="filter-tab active" data-filter="all" onclick="setResultFilter('all')">Tất cả</div>
-          <div class="filter-tab" data-filter="OK" onclick="setResultFilter('OK')"><i class="fa-solid fa-check" style="color:#059669"></i> OK</div>
-          <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-xmark" style="color:#DC2626"></i> Sai Pass</div>
-          <div class="filter-tab" data-filter="PENDING" onclick="setResultFilter('PENDING')"><i class="fa-solid fa-hourglass-half" style="color:#D97706"></i> Chưa thể check</div>
+          <div class="filter-tab active" data-filter="all" onclick="setResultFilter('all')">Tất cả <span class="filter-count" id="count_all"></span></div>
+          <div class="filter-tab" data-filter="OK" onclick="setResultFilter('OK')"><i class="fa-solid fa-circle-check" style="color:#059669"></i> OK <span class="filter-count" id="count_OK"></span></div>
+          <div class="filter-tab" data-filter="NOT_MET" onclick="setResultFilter('NOT_MET')"><i class="fa-solid fa-triangle-exclamation" style="color:#D97706"></i> Không đạt <span class="filter-count" id="count_NOT_MET"></span></div>
+          <div class="filter-tab" data-filter="LOCKED" onclick="setResultFilter('LOCKED')"><i class="fa-solid fa-lock" style="color:#C2410C"></i> Bị khóa <span class="filter-count" id="count_LOCKED"></span></div>
+          <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-circle-xmark" style="color:#DC2626"></i> Sai Pass <span class="filter-count" id="count_FAIL"></span></div>
+          <div class="filter-tab" data-filter="PENDING" onclick="setResultFilter('PENDING')"><i class="fa-solid fa-hourglass-half" style="color:#64748B"></i> Chưa thể check <span class="filter-count" id="count_PENDING"></span></div>
         </div>
         <div class="results-search-wrap">
           <i class="fa-solid fa-magnifying-glass"></i>
@@ -1940,6 +1958,40 @@ function scheduleDetail(id) {
   }, 4000);
 }
 
+function getRowCategory(row, minLevel = 12) {
+  const st = String(row.status || '').toUpperCase();
+  const ps = String(row.player_status || '').toLowerCase();
+  const rt = String(row.result_type || '').toLowerCase();
+  const lvStr = String(row.level || '').trim();
+  const lvNum = parseInt(lvStr, 10);
+
+  if (st === 'CHƯA THỂ CHECK' || rt === 'chưa thể check') {
+    return 'PENDING';
+  }
+  if (st !== 'OK' || rt === 'sai pass') {
+    return 'FAIL';
+  }
+  if (ps.includes('khóa') || ps.includes('ban') || ps.includes('cấm')) {
+    return 'LOCKED';
+  }
+  if (Number.isFinite(lvNum) && lvNum >= minLevel) {
+    return 'OK';
+  }
+  return 'NOT_MET';
+}
+
+function updateFilterTabCounts(rows, minLevel) {
+  const counts = { all: rows.length, OK: 0, NOT_MET: 0, LOCKED: 0, FAIL: 0, PENDING: 0 };
+  rows.forEach(r => {
+    const cat = getRowCategory(r, minLevel);
+    if (counts[cat] !== undefined) counts[cat]++;
+  });
+  for (const k in counts) {
+    const el = document.getElementById('count_' + k);
+    if (el) el.textContent = '(' + formatNumber(counts[k]) + ')';
+  }
+}
+
 function setResultFilter(filter) {
   currentFilter = filter;
   document.querySelectorAll('.filter-tab').forEach(t => {
@@ -1954,15 +2006,12 @@ function filterCurrentRows() {
 }
 
 function renderFilteredRows() {
+  const minLevel = parseInt(document.getElementById('exportMinLevel')?.value, 10) || 12;
+  updateFilterTabCounts(currentRawRows, minLevel);
+
   let rows = currentRawRows;
   if (currentFilter !== 'all') {
-    rows = rows.filter(r => {
-      const st = String(r.status || '').toUpperCase();
-      if (currentFilter === 'OK') return st === 'OK';
-      if (currentFilter === 'FAIL') return st !== 'OK' && st !== 'CHƯA THỂ CHECK';
-      if (currentFilter === 'PENDING') return st === 'CHƯA THỂ CHECK';
-      return true;
-    });
+    rows = rows.filter(r => getRowCategory(r, minLevel) === currentFilter);
   }
   if (currentSearch) {
     rows = rows.filter(r => {
@@ -1984,15 +2033,31 @@ function renderFilteredRows() {
     '</tr></thead><tbody>';
 
   rows.forEach(row => {
-    const st = String(row.status || '').toUpperCase();
+    const cat = getRowCategory(row, minLevel);
     let tagClass = 'tag-badge fail';
     let tagIcon = '<i class="fa-solid fa-circle-xmark"></i>';
-    if (st === 'OK') {
+    let tagText = esc(row.status || '');
+
+    if (cat === 'OK') {
       tagClass = 'tag-badge ok';
       tagIcon = '<i class="fa-solid fa-circle-check"></i>';
-    } else if (st === 'CHƯA THỂ CHECK') {
+      tagText = 'OK';
+    } else if (cat === 'NOT_MET') {
+      tagClass = 'tag-badge not-met';
+      tagIcon = '<i class="fa-solid fa-triangle-exclamation"></i>';
+      tagText = 'Không đạt';
+    } else if (cat === 'LOCKED') {
+      tagClass = 'tag-badge locked';
+      tagIcon = '<i class="fa-solid fa-lock"></i>';
+      tagText = 'Bị khóa';
+    } else if (cat === 'PENDING') {
       tagClass = 'tag-badge pending';
       tagIcon = '<i class="fa-solid fa-hourglass"></i>';
+      tagText = 'Chưa thể check';
+    } else {
+      tagClass = 'tag-badge fail';
+      tagIcon = '<i class="fa-solid fa-circle-xmark"></i>';
+      tagText = 'Sai Pass';
     }
 
     const acc = esc(row.account || '');
@@ -2000,14 +2065,22 @@ function renderFilteredRows() {
     const copyBtn = copyData ? '<button class="copy-btn" onclick="copyToClipboard(\'' + copyData + '\', this)" title="Sao chép toàn bộ dòng thông tin (user|pass|mail|...)"><i class="fa-regular fa-copy"></i></button>' : '';
     const lvl = row.level ? '<span class="level-badge">Lv.' + esc(row.level) + '</span>' : '-';
 
+    let playerStatusHtml = esc(row.player_status || '-');
+    const psLower = String(row.player_status || '').toLowerCase();
+    if (psLower.includes('khóa') || psLower.includes('ban')) {
+      playerStatusHtml = '<span class="tag-badge locked"><i class="fa-solid fa-lock"></i> ' + esc(row.player_status) + '</span>';
+    } else if (psLower.includes('chưa tạo nhân vật')) {
+      playerStatusHtml = '<span class="tag-badge not-met"><i class="fa-solid fa-user-slash"></i> ' + esc(row.player_status) + '</span>';
+    }
+
     h += '<tr>' +
       '<td>' + esc(row.stt ?? '') + '</td>' +
       '<td><span class="account-cell"><strong>' + acc + '</strong>' + copyBtn + '</span></td>' +
-      '<td><span class="' + tagClass + '">' + tagIcon + ' ' + esc(row.status || '') + '</span></td>' +
+      '<td><span class="' + tagClass + '">' + tagIcon + ' ' + tagText + '</span></td>' +
       '<td>' + esc(row.uid || '-') + '</td>' +
       '<td>' + esc(row.name || '-') + '</td>' +
       '<td>' + lvl + '</td>' +
-      '<td>' + esc(row.player_status || '-') + '</td>' +
+      '<td>' + playerStatusHtml + '</td>' +
     '</tr>';
   });
 
