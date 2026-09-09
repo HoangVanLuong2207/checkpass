@@ -500,7 +500,14 @@ class LocalStore:
         self._conn.execute("PRAGMA busy_timeout=10000")
         self._lock = threading.RLock()
         with self._lock:
-            self._conn.executescript(_SCHEMA)
+            # Tạo các bảng cơ bản trước
+            for statement in _SCHEMA.strip().split(";"):
+                stmt = statement.strip()
+                if stmt:
+                    try:
+                        self._conn.execute(stmt)
+                    except Exception:
+                        pass
             self._conn.commit()
             # Migration cho DB cũ
             for mig in [
@@ -656,8 +663,6 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
         result.append(ParsedAccount(account, password))
-        if len(result) >= MAX_CHUNK_LIMIT * 10000:
-            raise ValueError("Quá nhiều tài khoản trong một lần gửi")
     if not result:
         raise ValueError("Danh sách trống hoặc không có dòng hợp lệ")
     return result
@@ -667,271 +672,19 @@ def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[Pa
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
 
 
-_PAGE_HTML = """
-<!doctype html>
-<html lang="vi">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Garena Check Tool</title>
-<style>
-:root{color-scheme:dark;font-family:'Segoe UI',system-ui,sans-serif}
-*{box-sizing:border-box;margin:0;padding:0}
-body{background:#0e1117;color:#e6edf3;min-height:100vh;padding:18px}
-.container{max-width:900px;margin:0 auto}
-header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
-header h1{font-size:22px;color:#58a6ff}
-header .badge{background:#238636;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700}
-.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;margin-bottom:16px}
-.card h2{font-size:16px;margin-bottom:12px;color:#79c0ff}
-textarea{width:100%;height:140px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:8px;padding:10px;font-family:monospace;font-size:13px;resize:vertical}
-textarea:focus{border-color:#2f81f7;outline:none}
-.row{display:flex;gap:12px;align-items:end;flex-wrap:wrap}
-.field{flex:1;min-width:120px}
-.field label{display:block;font-size:13px;color:#8b949e;margin-bottom:4px}
-.field input,.field select{width:100%;padding:8px;background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px}
-btn,button,.btn{padding:10px 20px;border:0;border-radius:8px;font-weight:700;cursor:pointer;font-size:14px}
-.btn-primary{background:#238636;color:#fff}.btn-primary:hover{background:#2ea043}
-.btn-primary:disabled{opacity:.5;cursor:wait}
-.btn-sm{padding:6px 14px;font-size:12px}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin:12px 0}
-.stat{background:#0d1117;border-radius:8px;padding:12px;text-align:center}
-.stat .num{font-size:28px;font-weight:800;color:#58a6ff}
-.stat .lbl{font-size:11px;color:#8b949e;margin-top:2px}
-.stat.ok .num{color:#56d364}
-.stat.fail .num{color:#ff7b72}
-.stat.pending .num{color:#d29922}
-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:10px}
-th{text-align:left;padding:8px 6px;border-bottom:2px solid #30363d;color:#8b949e;font-size:11px;text-transform:uppercase}
-td{padding:7px 6px;border-bottom:1px solid #21262d}
-tr:hover{background:#1c2128}
-.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
-.tag-ok{background:#23863633;color:#56d364}
-.tag-fail{background:#da363333;color:#ff7b72}
-.tag-run{background:#d2992233;color:#d29922}
-.empty{color:#484f58;text-align:center;padding:30px}
-#toast{position:fixed;bottom:20px;right:20px;background:#238636;color:#fff;padding:10px 18px;border-radius:8px;font-weight:600;display:none;z-index:99;box-shadow:0 4px 20px #0006}
-.jobs-list{max-height:500px;overflow-y:auto}
-.retention-notice{background:#d2992230;border:1px solid #d29922;border-radius:10px;padding:12px 14px;margin-bottom:16px;color:#f0d68a;font-size:13px;line-height:1.5}
-.retention-notice strong{color:#ffd66b}
-</style>
-</head>
-<body>
-<div class="container">
-<header>
-  <h1>🎮 Garena Check Tool</h1>
-  <span class="badge">MASTER</span>
-  <span id="ownerBadge" style="margin-left:auto;background:#1f6feb;color:#fff;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:600"></span>
-  <button class="btn btn-sm" id="clearAllDataBtn" style="display:none;background:#da3633;color:#fff;margin-left:8px" onclick="clearAllData()">🗑️ Clear All Data</button>
-  <button class="btn btn-sm" style="background:#30363d;color:#fff;margin-left:8px" onclick="changeKey()">🔑 Đổi Key</button>
-</header>
+_UI_FILE = Path(__file__).parent / "master_ui.html"
 
-<div class="retention-notice">
-  <strong>⚠️ Chính sách lưu dữ liệu:</strong> Dữ liệu job và kết quả chỉ được lưu tối đa <strong>2 ngày</strong> (hôm nay và hôm qua). Dữ liệu cũ sẽ được dọn tự động; sau khi đã xóa, <strong>kể cả admin cũng không thể khôi phục</strong>.
-</div>
 
-<div class="card" id="keyCard" style="border-color:#1f6feb">
-  <h2>🔐 License Key (f:license-server)</h2>
-  <div class="row">
-    <div class="field" style="flex:2"><label>License Key</label><input type="password" id="keyInput" placeholder="Nhập key..."></div>
-    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" onclick="saveKey()">✅ Lưu & Kiểm tra</button></div>
-  </div>
-  <div id="keyStatus" style="margin-top:10px;font-size:13px"></div>
-</div>
+def _get_page_html() -> str:
+    if _UI_FILE.is_file():
+        try:
+            return _UI_FILE.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"[master] Lỗi đọc master_ui.html: {exc}", flush=True)
+    return """<!doctype html><html><body><h1>CHECK.SP1S.SHOP</h1><p>Vui lòng kiểm tra file master_ui.html</p></body></html>"""
 
-<div class="card">
-  <h2>📋 Gửi danh sách tài khoản</h2>
-  <textarea id="accInput" placeholder="Nhập tài khoản, mỗi dòng 1 acc&#10;Định dạng: user|pass  hoặc  user:pass&#10;&#10;Ví dụ:&#10;account1|password1&#10;account2|password2"></textarea>
-  <div class="row" style="margin-top:12px">
-    <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
-    <div class="field"><label>&nbsp;</label><button class="btn btn-sm" style="background:#30363d;color:#fff" onclick="document.getElementById('accFile').click()">📄 Nhập file</button></div>
-    <div class="field"><label>&nbsp;</label><button class="btn btn-primary" id="btnSend" onclick="sendJob()">🚀 Gửi check</button></div>
-  </div>
-</div>
 
-<div class="card">
-  <h2>📊 Danh sách Jobs của bạn</h2>
-  <div style="margin-bottom:10px"><button class="btn btn-sm btn-primary" onclick="loadJobs()">🔄 Refresh</button></div>
-  <div id="jobsList" class="jobs-list"><div class="empty">Chưa có job nào</div></div>
-</div>
-
-<div class="card" id="detailCard" style="display:none">
-  <h2>📝 Chi tiết Job #<span id="detailJobId"></span><span id="detailDuration" style="font-size:14px;font-weight:600;color:#8b949e;margin-left:10px"></span> <span id="detailOwner" style="font-size:12px;color:#8b949e"></span></h2>
-  <div class="stats" id="detailStats"></div>
-  <div style="margin:10px 0;display:flex;gap:8px">
-    <button class="btn btn-sm btn-primary" onclick="refreshDetail()">🔄 Refresh</button>
-    <button class="btn btn-sm" id="stopJobBtn" onclick="stopCurrentJob()" style="background:#da3633">⏹ Dừng job</button>
-    <button class="btn btn-sm btn-primary" onclick="exportTxt()" style="background:#1f6feb">📥 Xuất TXT</button>
-    <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:#8b949e">LV đạt từ <input id="exportMinLevel" type="number" min="1" max="1000" value="12" style="width:58px;padding:6px"></label>
-    <button class="btn btn-sm btn-primary" onclick="exportXlsx()" style="background:#8250df">📊 Xuất Excel</button>
-  </div>
-  <div id="detailRows"><div class="empty">Đang tải...</div></div>
-</div>
-</div>
-
-<div id="toast"></div>
-
-<script>
-const keyFromUrl=new URLSearchParams(window.location.search).get('key');
-let TOKEN=keyFromUrl||localStorage.getItem('licenseKey')||localStorage.getItem('masterToken')||'';
-if(keyFromUrl){localStorage.setItem('licenseKey',TOKEN);history.replaceState(null,'',window.location.pathname);}
-if(!TOKEN){
-  TOKEN=prompt('Nhập License Key (key từ f:license-server):','')||'';
-  if(TOKEN) localStorage.setItem('licenseKey',TOKEN);
-}
-function getHeaders(){return {'Authorization':'Bearer '+TOKEN,'Content-Type':'application/json'};}
-let H=getHeaders();
-let currentJobId=null;
-let detailPage=1;
-const DETAIL_PAGE_SIZE=50;
-
-function toast(msg,ms=3000){const t=document.getElementById('toast');t.textContent=msg;t.style.display='block';setTimeout(()=>t.style.display='none',ms)}
-
-async function api(path,opt={}){
-  const r=await fetch(path,{headers:getHeaders(),...opt});
-  const text=await r.text();
-  let j;
-  try{ j=text?JSON.parse(text):{ok:false,error:'Server trả về rỗng (status '+r.status+')'}; }
-  catch(e){ j={ok:false,error:'Lỗi parse JSON: '+(text.slice(0,200)||'empty')+' (status '+r.status+')'}; }
-  if(r.status===401){ toast('❌ '+(j.error||'Key không hợp lệ, vui lòng đổi key')); }
-  else if(!r.ok && !j.error){ j.error='Lỗi '+r.status+': '+text.slice(0,200); }
-  return j;
-}
-
-function previewKey(k){if(!k) return '';if(k.length<=8) return k.slice(0,2)+'***'+k.slice(-1);return k.slice(0,4)+'***'+k.slice(-2);}
-function updateOwnerBadge(){const el=document.getElementById('ownerBadge');if(el) el.textContent=TOKEN?('Key: '+previewKey(TOKEN)):'Chưa có key';const inp=document.getElementById('keyInput');if(inp && !inp.value) inp.value=TOKEN;}
-function setClearAllButton(visible){const btn=document.getElementById('clearAllDataBtn');if(btn)btn.style.display=visible?'inline-block':'none';}
-function changeKey(){const k=prompt('Nhập License Key mới:','');if(k!==null){TOKEN=k.trim();localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();checkKey();loadJobs();toast('Đã đổi key');}}
-async function saveKey(){const inp=document.getElementById('keyInput');const k=(inp?inp.value.trim():'');if(!k){toast('Nhập key!');return;}TOKEN=k;localStorage.setItem('licenseKey',TOKEN);H=getHeaders();setClearAllButton(false);updateOwnerBadge();await checkKey();loadJobs();}
-async function checkKey(){
-  const st=document.getElementById('keyStatus');if(!st) return;
-  if(!TOKEN){setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">Chưa nhập key</span>';return;}
-  st.innerHTML='Đang kiểm tra...';
-  try{
-    const r=await fetch('/api/verify?token='+encodeURIComponent(TOKEN),{headers:getHeaders()});
-    const j=await r.json();
-    if(j.valid||j.ok){setClearAllButton(j.is_admin===true);st.innerHTML='<span style="color:#56d364">✅ Key hợp lệ ('+previewKey(TOKEN)+')</span>';}
-    else{setClearAllButton(false);st.innerHTML='<span style="color:#ff7b72">❌ Key không hợp lệ: '+(j.error||'unknown')+'</span>';}
-  }catch(e){setClearAllButton(false);st.innerHTML='<span style="color:#d29922">⚠️ Không kiểm tra được: '+e.message+'</span>';}
-}
-updateOwnerBadge();checkKey();
-
-function importAccountsFile(){
-  const input=document.getElementById('accFile'),file=input&&input.files&&input.files[0];
-  if(!file)return;
-  if(file.size>32*1024*1024){toast('❌ File tối đa 32 MB');input.value='';return;}
-  const reader=new FileReader();
-  reader.onload=()=>{document.getElementById('accInput').value=String(reader.result||'').replace(/^\uFEFF/,'');toast('✅ Đã nhập file '+file.name);input.value='';};
-  reader.onerror=()=>{toast('❌ Không đọc được file');input.value='';};
-  reader.readAsText(file);
-}
-
-async function sendJob(){
-  const text=document.getElementById('accInput').value.trim();
-  if(!text){toast('Nhập danh sách tài khoản!');return}
-  const btn=document.getElementById('btnSend');btn.disabled=true;btn.textContent='⏳ Đang gửi...';
-  try{
-    const d=await api('/api/jobs',{method:'POST',body:JSON.stringify({text})});
-    if(d.ok){toast('✅ Tạo Job #'+d.job_id+' ('+d.total+' acc)');document.getElementById('accInput').value='';loadJobs();viewJob(d.job_id)}
-    else toast('❌ '+d.error)
-  }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;btn.textContent='🚀 Gửi check'}
-}
-
-function formatJobDuration(start,end){
-  const startTime=Number(start),endTime=Number(end)||Date.now()/1000;
-  if(!Number.isFinite(startTime)||startTime<=0)return '--:--:--';
-  const total=Math.max(0,Math.floor(endTime-startTime));
-  const hours=Math.floor(total/3600),minutes=Math.floor((total%3600)/60),seconds=total%60;
-  return String(hours).padStart(2,'0')+':'+String(minutes).padStart(2,'0')+':'+String(seconds).padStart(2,'0');
-}
-function updateJobDurations(){document.querySelectorAll('.job-duration').forEach(el=>{el.textContent=formatJobDuration(el.dataset.start,el.dataset.end);});}
-function jobDurationHtml(job){return '<span class="job-duration" data-start="'+Number(job.created_at||0)+'" data-end="'+Number(job.finished_at||0)+'"></span>';}
-
-async function loadJobs(){
-  const el=document.getElementById('jobsList');
-  try{
-    const d=await api('/api/jobs_list');
-    if(!d.ok||!d.jobs||d.jobs.length===0){el.innerHTML='<div class="empty">Chưa có job nào</div>';return}
-    let h='<table><tr><th>ID</th><th>Tổng</th><th>Trạng thái</th><th>Thời gian</th><th>OK</th><th>Sai pass</th><th>Chưa thể check</th><th></th></tr>';
-    d.jobs.forEach(j=>{
-      const st=j.status==='done'?'<span class="tag tag-ok">Xong</span>':'<span class="tag tag-run">Đang chạy</span>';
-      h+='<tr><td>#'+j.id+'</td><td>'+j.total+'</td><td>'+st+'</td><td>'+jobDurationHtml(j)+'</td><td style="color:#56d364">'+(j.ok||0)+'</td><td style="color:#ff7b72">'+(j.fail||0)+'</td><td style="color:#d29922">'+(j.uncheckable||0)+'</td>';
-      h+='<td><button class="btn btn-sm btn-primary" onclick="viewJob('+j.id+')">Xem</button></td></tr>'
-    });
-    el.innerHTML=h+'</table>';updateJobDurations();
-  }catch(e){el.innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
-}
-
-async function viewJob(id){
-  currentJobId=id;
-  detailPage=1;
-  document.getElementById('detailCard').style.display='block';
-  document.getElementById('detailJobId').textContent=id;
-  refreshDetail();
-}
-
-async function refreshDetail(){
-  if(!currentJobId)return;
-  const id=currentJobId;
-  try{
-    const s=await api('/api/jobs/'+id);
-    if(!s.ok){document.getElementById('detailStats').innerHTML='<div class="empty">'+s.error+'</div>';return}
-    const c=s.chunks||{},r=s.results||{};
-    const stopBtn=document.getElementById('stopJobBtn');stopBtn.style.display=s.status==='open'?'inline-block':'none';
-    const duration=document.getElementById('detailDuration');
-    duration.dataset.start=Number(s.created_at||0);duration.dataset.end=Number(s.finished_at||0);
-    duration.textContent=' · ⏱ '+formatJobDuration(duration.dataset.start,duration.dataset.end);
-    document.getElementById('detailStats').innerHTML=
-      '<div class="stat"><div class="num">'+s.total+'</div><div class="lbl">Tổng</div></div>'+
-      '<div class="stat ok"><div class="num">'+(r.ok||0)+'</div><div class="lbl">OK</div></div>'+
-      '<div class="stat fail"><div class="num">'+(r.fail||0)+'</div><div class="lbl">Sai pass</div></div>'+
-      '<div class="stat pending"><div class="num">'+(r.uncheckable||0)+'</div><div class="lbl">Chưa thể check</div></div>'+
-      '<div class="stat pending"><div class="num">'+(c.pending||0)+'</div><div class="lbl">Chờ</div></div>'+
-      '<div class="stat"><div class="num">'+(c.claimed||0)+'</div><div class="lbl">Đang check</div></div>';
-    updateJobDurations();
-
-    const rd=await api('/api/jobs/'+id+'/rows?page='+detailPage+'&per_page='+DETAIL_PAGE_SIZE);
-    if(!rd.ok||!rd.rows||rd.rows.length===0){document.getElementById('detailRows').innerHTML='<div class="empty">Chưa có kết quả</div>';return}
-    let h='<table><tr><th>STT</th><th>Account</th><th>Status</th><th>UID</th><th>Tên</th><th>Level</th><th>Trạng thái tài khoản</th></tr>';
-    rd.rows.forEach(r=>{
-      const tag=r.status==='OK'?'tag-ok':(r.status==='CHƯA THỂ CHECK'?'tag-run':'tag-fail');
-      h+='<tr><td>'+r.stt+'</td><td><b>'+r.account+'</b></td><td><span class="tag '+tag+'">'+r.status+'</span></td>';
-      h+='<td>'+r.uid+'</td><td>'+r.name+'</td><td>'+r.level+'</td><td>'+(r.player_status||'')+'</td></tr>'
-    });
-    const totalPages=rd.total_pages||1;
-    h+='</table>';
-    if(totalPages>1){
-      h+='<div style="display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px">'+
-        '<button class="btn btn-sm btn-primary" '+(rd.page<=1?'disabled':'')+' onclick="goDetailPage('+(rd.page-1)+')">← Trước</button>'+
-        '<span style="font-size:12px;color:#8b949e">Trang '+rd.page+'/'+totalPages+' · '+rd.total+' kết quả</span>'+
-        '<button class="btn btn-sm btn-primary" '+(rd.page>=totalPages?'disabled':'')+' onclick="goDetailPage('+(rd.page+1)+')">Sau →</button></div>';
-    }
-    document.getElementById('detailRows').innerHTML=h;
-    if(s.status==='open')setTimeout(refreshDetail,5000)
-  }catch(e){document.getElementById('detailRows').innerHTML='<div class="empty">Lỗi: '+e.message+'</div>'}
-}
-function goDetailPage(page){detailPage=Math.max(1,page);refreshDetail();}
-
-function exportTxt(){if(currentJobId)window.open('/api/jobs/'+currentJobId+'/export.txt?token='+TOKEN)}
-function exportXlsx(){if(!currentJobId)return;const input=document.getElementById('exportMinLevel');const minLevel=Number(input&&input.value);if(!Number.isInteger(minLevel)||minLevel<1||minLevel>1000){toast('LV tối thiểu phải từ 1 đến 1000');return;}window.open('/api/jobs/'+currentJobId+'/export.xlsx?min_level='+minLevel+'&token='+encodeURIComponent(TOKEN))}
-async function stopCurrentJob(){if(!currentJobId||!confirm('Dừng job này? Các acc chưa xong sẽ không được check tiếp.'))return;const b=document.getElementById('stopJobBtn');b.disabled=true;try{const d=await api('/api/jobs/'+currentJobId+'/stop',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'Không thể dừng job');toast('⏹ Đã yêu cầu dừng job');refreshDetail();loadJobs()}catch(e){toast('❌ '+e.message);b.disabled=false;}}
-async function clearAllData(){
-  if(!confirm('Xóa TOÀN BỘ jobs, chunks và kết quả? Không thể hoàn tác.'))return;
-  const btn=document.getElementById('clearAllDataBtn');btn.disabled=true;
-  try{
-    const d=await api('/api/admin/clear_all',{method:'POST',body:'{}'});
-    if(!d.ok){toast('❌ '+(d.error||'Không thể xóa dữ liệu'));return;}
-    currentJobId=null;document.getElementById('detailCard').style.display='none';
-    document.getElementById('jobsList').innerHTML='<div class="empty">Chưa có job nào</div>';
-    toast('✅ Đã xóa '+(d.jobs||0)+' job và '+(d.results||0)+' kết quả');
-  }catch(e){toast('❌ Lỗi: '+e.message)}finally{btn.disabled=false;}
-}
-
-loadJobs();setInterval(loadJobs,15000);setInterval(updateJobDurations,1000);
-</script>
-</body>
-</html>
-"""
+_PAGE_HTML = _get_page_html()
 
 
 class MasterHandler(BaseHTTPRequestHandler):
@@ -1125,7 +878,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "debug": {"token_len": len(tok), "master_token_len": len(mt), "token_preview": _preview_key(tok)}})
                 return
             if path == "/" or path == "/index.html":
-                self._html(_PAGE_HTML)
+                self._html(_get_page_html())
                 return
             if path == "/api/admin/prune_before_today":
                 self._handle_prune_before_today()
@@ -1386,6 +1139,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "finished_at": row[5],
                 "total": row[2],
                 "status": row[4],
+                "processed": results_count,
                 "ok": ok_count,
                 "fail": fail_count,
                 "uncheckable": uncheckable_count,
@@ -1935,13 +1689,30 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         store = self.server.store
         rows_raw = store.fetch(
-            "SELECT row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
+            "SELECT chunk_id, row_json FROM results WHERE job_id=? ORDER BY id", (job_id,)
         )
+        chunks_raw = store.fetch(
+            "SELECT id, account FROM chunks WHERE job_id=?", (job_id,)
+        )
+        credentials_by_chunk: dict[int, list[str]] = {}
+        for chunk_id, credentials_json in chunks_raw:
+            try:
+                credentials = json.loads(credentials_json)
+            except (TypeError, json.JSONDecodeError):
+                credentials = []
+            credentials_by_chunk[int(chunk_id)] = credentials if isinstance(credentials, list) else []
         grouped_rows: dict[str, list[dict[str, Any]]] = {
             "Đạt": [], "Không đạt": [], "CTNV": [], "Chưa thể check": [], "Bị khóa": [], "Sai pass": [],
         }
-        for item in rows_raw:
-            row = json.loads(item[0])
+        for chunk_id, row_json in rows_raw:
+            row = json.loads(row_json)
+            try:
+                row_index = int(str(row.get("stt") or "0")) - 1
+            except (TypeError, ValueError):
+                row_index = -1
+            credentials = credentials_by_chunk.get(int(chunk_id), [])
+            if 0 <= row_index < len(credentials):
+                row["_export_credential"] = str(credentials[row_index])
             level = str(row.get("level") or "").strip()
             player_status = str(row.get("player_status") or "").strip()
             is_ctnv = level.casefold() == "ctnv" or player_status.casefold() == "chưa tạo nhân vật"
@@ -1966,7 +1737,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 is_ctnv = level.casefold() == "ctnv" or player_status.casefold() == "chưa tạo nhân vật"
                 name = "CTNV" if is_ctnv else str(row.get("name") or "").strip()
                 status = player_status or str(row.get("status") or "").strip()
-                lines.append(" || ".join((str(row.get("account") or "").strip(), str(row.get("uid") or "").strip(), name, level, status)))
+                lines.append(" || ".join((str(row.get("_export_credential") or row.get("account") or "").strip(), str(row.get("uid") or "").strip(), name, level, status)))
         body = "\n".join(lines) + ("\n" if lines else "")
         data = body.encode("utf-8-sig")
         self.send_response(HTTPStatus.OK)

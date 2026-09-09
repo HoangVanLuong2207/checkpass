@@ -19,3 +19,10 @@ sale_catalog_export.py
 skin.py
 skins.json
 XUAT_CATALOG_SKIN_SALE.cmd
+
+# SQLite databases
+master.db
+master.db-shm
+master.db-wal
+master_jobs.db
+data.db
