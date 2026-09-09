@@ -60,6 +60,8 @@ class App:
         self.rows: dict[str, dict[str, Any]] = {}
         self.refreshing = False
         self.next_refresh: str | None = None
+        self.setup_total = 0
+        self.setup_finished = 0
         self._build()
         self.root.after(200, self._drain)
         self.root.after(1000, self.refresh)
@@ -102,7 +104,10 @@ class App:
             self.status.set("Cần danh sách SSH và MASTER_TOKEN"); return
         self.setup_log.configure(state="normal")
         self.setup_log.delete("1.0", "end")
+        for label, _target in entries:
+            self.setup_log.insert("end", f"[{label}] Đang setup...\n")
         self.setup_log.configure(state="disabled")
+        self.setup_total, self.setup_finished = len(entries), 0
         self.status.set(f"Đang setup {len(entries)} VPS...")
         def one(label: str, target: str) -> None:
             env = "\n".join((f"MASTER_URL={self.master_url.get().strip()}", f"MASTER_TOKEN={token}", f"SATELLITE_ID={label}", f"WORKERS={self.workers.get()}", f"CONCURRENT_CHUNKS={self.chunks.get()}", f"START_GAP={self.gap.get()}", "TIMEOUT=20", "LEASE_MINUTES=3", "POLL_INTERVAL=10", "HEALTH_HOST=127.0.0.1", "HEALTH_PORT=8765", ""))
@@ -154,7 +159,8 @@ class App:
             while True:
                 kind, label, ok, data = self.events.get_nowait()
                 if kind == "setup":
-                    self.status.set(f"{label}: {'OK' if ok else 'lỗi'}")
+                    self.setup_finished += 1
+                    self.status.set(f"Setup {self.setup_finished}/{self.setup_total} · {label}: {'OK' if ok else 'lỗi'}")
                     self.setup_log.configure(state="normal")
                     self.setup_log.insert("end", f"\n[{label}] {'OK' if ok else 'LỖI'}\n{data[-1800:]}\n")
                     self.setup_log.see("end")
