@@ -6,7 +6,6 @@ import random
 import socket
 import struct
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 
 
@@ -251,9 +250,8 @@ class SsoSession:
 
 
 class GarenaTcpClient:
-    def __init__(self, timeout: float = 15.0, proxy_url: str | None = None):
+    def __init__(self, timeout: float = 15.0):
         self.timeout = timeout
-        self.proxy_url = (proxy_url if proxy_url is not None else os.environ.get("GARENA_PROXY", "")).strip()
         self.socket: socket.socket | None = None
         self.session_key: bytes | None = None
         self.uid = 0
@@ -269,9 +267,6 @@ class GarenaTcpClient:
 
     def connect(self) -> None:
         self.close()
-        if self.proxy_url:
-            self._connect_via_socks5()
-            return
         candidates: list[str] = []
         try:
             candidates.extend(
@@ -294,35 +289,6 @@ class GarenaTcpClient:
             except OSError as exc:
                 last_error = exc
         raise GarenaError("Không kết nối được máy chủ đăng nhập Garena") from last_error
-
-    def _connect_via_socks5(self) -> None:
-        """Connect through an optional SOCKS5 proxy configured for this process."""
-        try:
-            import socks
-        except ImportError as exc:
-            raise GarenaError("Thiếu PySocks; hãy chạy pip install -r requirements.txt") from exc
-
-        raw = self.proxy_url
-        parsed = urllib.parse.urlsplit(raw if "://" in raw else f"socks5://{raw}")
-        if parsed.scheme.lower() not in {"socks5", "socks5h"} or not parsed.hostname or not parsed.port:
-            raise GarenaError("Proxy phải có dạng socks5://user:pass@host:port")
-        proxy_socket = socks.socksocket(socket.AF_INET, socket.SOCK_STREAM)
-        proxy_socket.set_proxy(
-            socks.SOCKS5,
-            parsed.hostname,
-            parsed.port,
-            rdns=parsed.scheme.lower() == "socks5h",
-            username=urllib.parse.unquote(parsed.username) if parsed.username else None,
-            password=urllib.parse.unquote(parsed.password) if parsed.password else None,
-        )
-        try:
-            proxy_socket.settimeout(min(self.timeout, 5.0))
-            proxy_socket.connect((GARENA_HOST, GARENA_PORT))
-            proxy_socket.settimeout(self.timeout)
-            self.socket = proxy_socket
-        except OSError as exc:
-            proxy_socket.close()
-            raise GarenaError("Không kết nối được Garena qua SOCKS5 proxy") from exc
 
     def close(self) -> None:
         if self.socket is not None:
