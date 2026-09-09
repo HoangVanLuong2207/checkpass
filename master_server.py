@@ -37,6 +37,7 @@ DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
+MAX_JOB_ACCOUNTS = 50_000
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
 MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
@@ -1414,6 +1415,12 @@ class MasterHandler(BaseHTTPRequestHandler):
             parsed = parse_accounts(joined)
         except ValueError as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+        if len(parsed) > MAX_JOB_ACCOUNTS:
+            self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False,
+                "error": f"Mỗi job tối đa {MAX_JOB_ACCOUNTS:,} tài khoản. Danh sách hiện có {len(parsed):,} tài khoản.",
+            })
             return
         # Cố định 15 account/chunk; không nhận cấu hình từ client.
         chunk_size = DEFAULT_CHUNK_LIMIT
