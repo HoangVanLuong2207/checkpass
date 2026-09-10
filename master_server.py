@@ -677,6 +677,60 @@ def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[Pa
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
 
 
+def select_fair_claim_candidate(store: Any, now: float, satellite_id: str) -> tuple | None:
+    """Select one eligible chunk from the open job with the fewest active chunks.
+
+    Choosing a chunk globally would make a job's claim probability proportional
+    to its remaining chunk count.  Selecting the least-active job first prevents
+    a large job from starving smaller jobs.
+    """
+
+    selected_job = store.fetchone(
+        """
+        SELECT available.job_id
+        FROM (
+            SELECT DISTINCT c.job_id
+            FROM chunks AS c
+            JOIN jobs AS j ON j.id=c.job_id
+            WHERE j.status='open'
+              AND (
+                  c.status='pending'
+                  OR (c.status='claimed' AND c.lease_until IS NOT NULL AND c.lease_until < ?)
+              )
+              AND (c.avoid_satellite_id='' OR c.avoid_satellite_id<>?)
+        ) AS available
+        LEFT JOIN (
+            SELECT job_id, COUNT(*) AS active_count
+            FROM chunks
+            WHERE status='claimed'
+              AND (lease_until IS NULL OR lease_until >= ?)
+            GROUP BY job_id
+        ) AS active ON active.job_id=available.job_id
+        ORDER BY COALESCE(active.active_count, 0) ASC, available.job_id ASC
+        LIMIT 1
+        """,
+        (now, satellite_id, now),
+    )
+    if selected_job is None:
+        return None
+
+    return store.fetchone(
+        """
+        SELECT id, job_id, account
+        FROM chunks
+        WHERE job_id=?
+          AND (
+              status='pending'
+              OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
+          )
+          AND (avoid_satellite_id='' OR avoid_satellite_id<>?)
+        ORDER BY RANDOM()
+        LIMIT 1
+        """,
+        (selected_job[0], now, satellite_id),
+    )
+
+
 _UI_FILE = Path(__file__).parent / "master_ui.html"
 
 
@@ -1294,58 +1348,45 @@ class MasterHandler(BaseHTTPRequestHandler):
 
         store = self.server.store
         now = _now()
-        # Thử claim atomic — tránh việc 2 vệ tinh cùng nhận 1 pack và bỏ sót pack nhỏ
-        # Lặp tối đa 3 lần nếu gặp race
-        for _ in range(3):
-            row = store.fetchone(
-                """
-                SELECT id, job_id, account FROM chunks
-                WHERE (
-                    status='pending'
-                    OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
-                )
-                AND (avoid_satellite_id='' OR avoid_satellite_id<>?)
-                ORDER BY RANDOM()
-                LIMIT 1
-                """,
-                (now, satellite_id),
-            )
-            if row is None:
-                self._check_finish_all_jobs(now)
-                self._json(HTTPStatus.OK, {"ok": True, "claim": None})
-                return
-            chunk_id, job_id, account_data = row
-            # UPDATE có điều kiện — chỉ thành công nếu vẫn pending/lease hết hạn
-            if hasattr(store, "exec_with_changes"):
-                changed = store.exec_with_changes(
-                    "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
-                    (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
-                )
-            else:
-                store.exec(
-                    "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
-                    (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
-                )
-                # Fallback: kiểm tra lại satellite_id
-                chk = store.fetchone("SELECT satellite_id FROM chunks WHERE id=?", (chunk_id,))
-                changed = 1 if (chk and chk[0] == satellite_id) else 0
-            if changed == 0:
-                # Race: chunk đã bị vệ tinh khác lấy, thử chunk khác
-                continue
-            try:
-                accounts = json.loads(account_data)
-            except (json.JSONDecodeError, TypeError):
-                accounts = [account_data] if account_data else []
-            # Đảm bảo luôn trả về đúng số acc của pack, kể cả pack nhỏ (< chunk_size)
-            self._json(HTTPStatus.OK, {"ok": True, "claim": {
-                "chunk_id": chunk_id,
-                "job_id": job_id,
-                "lease_until": now + lease_minutes * 60,
-                "accounts": accounts,
-            }})
-            return
-        # Nếu sau 3 lần vẫn race, báo không có claim để vệ tinh thử lại
-        self._json(HTTPStatus.OK, {"ok": True, "claim": None})
+        claim_payload: dict[str, Any] | None = None
+        # Serialize the short select/update section so simultaneous pull requests
+        # see the active-count change before choosing their job.  The conditional
+        # UPDATE remains as protection when multiple master processes share a DB.
+        with self.server.claim_lock:
+            for _ in range(3):
+                row = select_fair_claim_candidate(store, now, satellite_id)
+                if row is None:
+                    break
+                chunk_id, job_id, account_data = row
+                if hasattr(store, "exec_with_changes"):
+                    changed = store.exec_with_changes(
+                        "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+                        (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+                    )
+                else:
+                    store.exec(
+                        "UPDATE chunks SET status='claimed', satellite_id=?, claimed_at=?, lease_until=? WHERE id=? AND (status='pending' OR (status='claimed' AND lease_until < ?))",
+                        (satellite_id, now, now + lease_minutes * 60, chunk_id, now),
+                    )
+                    chk = store.fetchone("SELECT satellite_id FROM chunks WHERE id=?", (chunk_id,))
+                    changed = 1 if (chk and chk[0] == satellite_id) else 0
+                if changed == 0:
+                    continue
+                try:
+                    accounts = json.loads(account_data)
+                except (json.JSONDecodeError, TypeError):
+                    accounts = [account_data] if account_data else []
+                claim_payload = {
+                    "chunk_id": chunk_id,
+                    "job_id": job_id,
+                    "lease_until": now + lease_minutes * 60,
+                    "accounts": accounts,
+                }
+                break
+
+        if claim_payload is None:
+            self._check_finish_all_jobs(now)
+        self._json(HTTPStatus.OK, {"ok": True, "claim": claim_payload})
 
     def _handle_heartbeat(self) -> None:
         """Gia hạn lease cho các chunk mà vệ tinh vẫn đang xử lý."""
@@ -1956,6 +1997,7 @@ class CoordinatorServer(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.store = store
         self.master_token = master_token
+        self.claim_lock = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
