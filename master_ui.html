@@ -1434,7 +1434,7 @@ table.data-table tbody tr:hover {
           <div class="filter-tab" data-filter="NOT_MET" onclick="setResultFilter('NOT_MET')"><i class="fa-solid fa-triangle-exclamation" style="color:#D97706"></i> Chưa đạt <span class="filter-count" id="count_NOT_MET"></span></div>
           <div class="filter-tab" data-filter="CTNV" onclick="setResultFilter('CTNV')"><i class="fa-solid fa-user-plus" style="color:#7C3AED"></i> Chưa tạo nhân vật <span class="filter-count" id="count_CTNV"></span></div>
           <div class="filter-tab" data-filter="LOCKED" onclick="setResultFilter('LOCKED')"><i class="fa-solid fa-lock" style="color:#C2410C"></i> Bị khóa <span class="filter-count" id="count_LOCKED"></span></div>
-          <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-circle-xmark" style="color:#DC2626"></i> Sai Pass <span class="filter-count" id="count_FAIL"></span></div>
+          <div class="filter-tab" data-filter="FAIL" onclick="setResultFilter('FAIL')"><i class="fa-solid fa-circle-xmark" style="color:#DC2626"></i> Không thể log <span class="filter-count" id="count_FAIL"></span></div>
           <div class="filter-tab" data-filter="PENDING" onclick="setResultFilter('PENDING')"><i class="fa-solid fa-hourglass-half" style="color:#64748B"></i> Chưa thể check <span class="filter-count" id="count_PENDING"></span></div>
         </div>
         <div class="results-search-wrap">
@@ -2079,7 +2079,7 @@ function renderFilteredRows() {
     } else {
       tagClass = 'tag-badge fail';
       tagIcon = '<i class="fa-solid fa-circle-xmark"></i>';
-      tagText = 'Sai Pass';
+      tagText = 'Không thể log';
     }
 
     const acc = esc(row.account || '');
