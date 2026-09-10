@@ -131,21 +131,22 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
 
 
 def tcp_login_was_rejected(error: Any) -> bool:
-    """Only an explicit Garena TCP rejection at LOGIN step proves credentials are wrong.
+    """Return whether Garena explicitly rejected the TCP LOGIN command.
     
     Rejection at LOGIN_PREPARE (0x100) is rate limiting, not wrong password.
-    Only rejection at LOGIN (0x101) with specific error codes means wrong credentials.
+    A rejection here means login was not possible; it does not by itself prove
+    that the password was wrong.
     """
 
     if bool(getattr(error, "garena_rejected", False)):
         command = getattr(error, "garena_command", 0)
         result_code = getattr(error, "garena_result", 0)
-        # Chỉ bước LOGIN (0x101) mới là sai pass thật
+        # Chỉ bước LOGIN (0x101) mới là một login rejection.
         # LOGIN_PREPARE (0x100) reject = rate limit
         # SSO_KEY_GET (0x1BA) reject = session issue
         if command == 0x101:
             return True
-        # Bước khác reject = rate limit / server issue, không phải sai pass
+        # Bước khác reject = rate limit / server issue.
         return False
     message = str(error or "").strip().casefold()
     ascii_message = "".join(
@@ -154,11 +155,11 @@ def tcp_login_was_rejected(error: Any) -> bool:
         if not unicodedata.combining(char)
     )
     explicitly_rejected = "tu choi" in ascii_message or "rejected" in ascii_message
-    # Chỉ coi là sai pass khi message rõ ràng là bước LOGIN bị reject
+    # Chỉ coi là login rejection khi message nói rõ Garena từ chối.
     if "garena" in ascii_message and explicitly_rejected:
         # Kiểm tra có phải bước LOGIN_PREPARE không
         if "prepare" in ascii_message or "0x100" in ascii_message:
-            return False  # Rate limit, không phải sai pass
+            return False  # Rate limit, không phải LOGIN rejection.
         return True
     return False
 
@@ -1175,7 +1176,7 @@ def format_user_output(result: dict[str, Any]) -> str:
     if tcp.get("credential_rejected"):
         return (
             f"Tài khoản: {str(tcp.get('account') or 'không có')}"
-            " || Trạng thái: FALSE || Lỗi: sai tài khoản hoặc mật khẩu (TCP từ chối)"
+            " || Trạng thái: FALSE || Lỗi: không thể đăng nhập (TCP từ chối)"
         )
     apis = result.get("apis") or {}
     web_auth = result.get("web_auth") or {}
@@ -1379,7 +1380,7 @@ BATCH_MAX_REQUEST_TIMEOUT = 8.0
 
 
 def batch_login_rejected_permanently(result: Any) -> bool:
-    """An explicit TCP rejection is the final wrong-password decision."""
+    """An explicit TCP LOGIN rejection is a terminal login failure."""
 
     if not isinstance(result, dict):
         return False
@@ -1674,10 +1675,10 @@ def batch_check_one(
         if login_rejected:
             errors.insert(
                 0,
-                "FALSE - sai tài khoản hoặc mật khẩu (TCP từ chối), dừng ngay",
+                "FALSE - không thể đăng nhập (TCP từ chối), dừng ngay",
             )
             row["status"] = "FAIL"
-            row["result_type"] = "Sai pass"
+            row["result_type"] = "Không thể log"
         elif gave_up_reason:
             errors.insert(
                 0,
@@ -1904,7 +1905,7 @@ tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;col
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Chỉ TCP từ chối rõ ràng mới được kết luận <code>FAIL / Sai pass</code>. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 100 lần thử hoặc 300 giây được đánh <code>CHƯA THỂ CHECK</code>, không phải sai pass. XLSX có sáu tab, gồm <code>Sai pass</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Khi TCP từ chối rõ ràng, kết quả là <code>FAIL / Không thể log</code>; kết quả này không tự nó chứng minh mật khẩu sai. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 100 lần thử hoặc 300 giây được đánh <code>CHƯA THỂ CHECK</code>. XLSX có sáu tab, gồm <code>Không thể log</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -2365,7 +2366,7 @@ class Handler(BaseHTTPRequestHandler):
                     (1,not_met,"Không đạt",not_met_fill),
                     (2,locked,"Bị khóa",locked_fill),
                     (3,special,"Đặc biệt",special_fill),
-                    (4,failed,"Sai pass",failed_fill),
+                    (4,failed,"Không thể log",failed_fill),
                     (5,uncheckable,"Chưa thể check",uncheckable_fill),
                 ]
                 for idx,data_list,label,fill in sheets:

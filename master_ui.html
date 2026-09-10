@@ -1977,7 +1977,7 @@ function getRowCategory(row, minLevel = 12) {
   if (st === 'CHƯA THỂ CHECK' || rt === 'chưa thể check') {
     return 'PENDING';
   }
-  if (st !== 'OK' || rt === 'sai pass') {
+  if (st !== 'OK' || rt === 'sai pass' || rt === 'không thể log') {
     return 'FAIL';
   }
   if (ps.includes('khóa') || ps.includes('ban') || ps.includes('cấm')) {
@@ -2167,7 +2167,7 @@ async function refreshDetail() {
       '<div class="stat-box blue"><div class="num">' + formatNumber(total) + '</div><div class="lbl">Tổng tài khoản</div></div>' +
       '<div class="stat-box"><div class="num">' + formatNumber(processed) + '</div><div class="lbl">Đã xử lý</div></div>' +
       '<div class="stat-box ok"><div class="num">' + formatNumber(r.ok || 0) + '</div><div class="lbl">OK (Đúng)</div></div>' +
-      '<div class="stat-box fail"><div class="num">' + formatNumber(r.fail || 0) + '</div><div class="lbl">Sai pass</div></div>' +
+      '<div class="stat-box fail"><div class="num">' + formatNumber(r.fail || 0) + '</div><div class="lbl">Không thể log</div></div>' +
       '<div class="stat-box pending"><div class="num">' + formatNumber(r.uncheckable || 0) + '</div><div class="lbl">Chưa thể check</div></div>' +
       '<div class="stat-box"><div class="num">' + formatNumber(c.pending) + ' / ' + formatNumber(c.claimed) + '</div><div class="lbl">Chunks chờ / chạy</div></div>';
 
