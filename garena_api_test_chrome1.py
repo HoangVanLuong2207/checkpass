@@ -64,6 +64,102 @@ MAX_BATCH_ACCOUNTS = 10**18
 ACCOUNT_MAX_ATTEMPTS = 3
 KIENTUONG_MAX_RETRIES = 6
 KIENTUONG_MAX_ATTEMPTS = 1 + KIENTUONG_MAX_RETRIES
+TCP_FAST_REJECTION_RATE_LIMIT_MS = 600
+
+
+def _normalized_error_text(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    return "".join(
+        char
+        for char in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(char)
+    )
+
+
+def _text_suggests_rate_limit(value: Any) -> bool:
+    text = _normalized_error_text(value)
+    return any(
+        marker in text
+        for marker in (
+            "rate limit",
+            "rate_limit",
+            "ratelimit",
+            "too many request",
+            "throttl",
+            "request frequency",
+            "qua nhieu yeu cau",
+            "gioi han tan suat",
+            "thu lai sau",
+        )
+    )
+
+
+def tcp_rate_limit_suspected(error: Any, elapsed_ms: int | float | None = None) -> bool:
+    """Recognize explicit rate-limit signals; response speed alone is not one."""
+
+    command = getattr(error, "garena_command", 0)
+    if bool(getattr(error, "garena_rejected", False)):
+        if command == 0x100:
+            return False
+    normalized_message = _normalized_error_text(error)
+    if (
+        ("login_prepare" in normalized_message or "0x100" in normalized_message)
+        and tcp_login_was_rejected(error)
+    ):
+        return False
+    if getattr(error, "code", None) == 429:
+        return True
+    if _text_suggests_rate_limit(error):
+        return True
+    return False
+
+
+def tcp_fast_login_rejection_should_retry(
+    error: Any, elapsed_ms: int | float | None
+) -> bool:
+    """A sub-600 ms LOGIN rejection is retried, not labeled as rate limit."""
+
+    if elapsed_ms is None or float(elapsed_ms) >= TCP_FAST_REJECTION_RATE_LIMIT_MS:
+        return False
+    command = getattr(error, "garena_command", 0)
+    if bool(getattr(error, "garena_rejected", False)):
+        return command == 0x101
+    normalized_message = _normalized_error_text(error)
+    if "login_prepare" in normalized_message or "0x100" in normalized_message:
+        return False
+    return tcp_login_was_rejected(error)
+
+
+def result_rate_limit_suspected(result: Any) -> bool:
+    """Find an HTTP/API rate-limit signal without inspecting account data."""
+
+    if not isinstance(result, dict):
+        return False
+    tcp = result.get("tcp") or {}
+    if isinstance(tcp, dict) and tcp.get("rate_limit_suspected"):
+        return True
+
+    def scan(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized_key = str(key).strip().casefold()
+                if normalized_key in {"status", "status_code", "http_status"}:
+                    try:
+                        if int(item) == 429:
+                            return True
+                    except (TypeError, ValueError):
+                        pass
+                if normalized_key in {
+                    "error", "message", "error_message", "detail", "reason"
+                } and _text_suggests_rate_limit(item):
+                    return True
+                if isinstance(item, (dict, list, tuple)) and scan(item):
+                    return True
+        elif isinstance(value, (list, tuple)):
+            return any(scan(item) for item in value)
+        return False
+
+    return scan(result)
 
 
 def resilient_tcp_client_type(tcp_module: Any) -> type:
@@ -132,8 +228,8 @@ def resilient_tcp_client_type(tcp_module: Any) -> type:
 
 def tcp_login_was_rejected(error: Any) -> bool:
     """Return whether Garena explicitly rejected the TCP LOGIN command.
-    
-    Rejection at LOGIN_PREPARE (0x100) is rate limiting, not wrong password.
+
+    Rejection at LOGIN_PREPARE (0x100) is also a terminal login failure.
     A rejection here means login was not possible; it does not by itself prove
     that the password was wrong.
     """
@@ -141,10 +237,9 @@ def tcp_login_was_rejected(error: Any) -> bool:
     if bool(getattr(error, "garena_rejected", False)):
         command = getattr(error, "garena_command", 0)
         result_code = getattr(error, "garena_result", 0)
-        # Chỉ bước LOGIN (0x101) mới là một login rejection.
-        # LOGIN_PREPARE (0x100) reject = rate limit
+        # LOGIN_PREPARE và LOGIN đều là từ chối đăng nhập dứt khoát.
         # SSO_KEY_GET (0x1BA) reject = session issue
-        if command == 0x101:
+        if command in {0x100, 0x101}:
             return True
         # Bước khác reject = rate limit / server issue.
         return False
@@ -157,9 +252,6 @@ def tcp_login_was_rejected(error: Any) -> bool:
     explicitly_rejected = "tu choi" in ascii_message or "rejected" in ascii_message
     # Chỉ coi là login rejection khi message nói rõ Garena từ chối.
     if "garena" in ascii_message and explicitly_rejected:
-        # Kiểm tra có phải bước LOGIN_PREPARE không
-        if "prepare" in ascii_message or "0x100" in ascii_message:
-            return False  # Rate limit, không phải LOGIN rejection.
         return True
     return False
 
@@ -953,6 +1045,8 @@ def legacy_account_sso_probe(sso_key: str, sso_expiry: int, timeout: float) -> d
                                 headers={"Referer": "https://kientuong.lienquan.garena.vn/"},
                             )
                             oauth_result["player_attempts"] = player_attempt
+                            if result_rate_limit_suspected(player_api):
+                                break
                             if kientuong_no_character_response(player_api):
                                 no_character_responses += 1
                             if kientuong_player_has_level(player_api):
@@ -1023,10 +1117,24 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             ]
     except Exception as exc:
         message = (str(exc).strip() or type(exc).__name__)[:500]
+        tcp_elapsed_ms = round((time.monotonic() - started) * 1000)
+        rate_limit_suspected = tcp_rate_limit_suspected(exc, tcp_elapsed_ms)
+        retryable_fast_rejection = bool(
+            not rate_limit_suspected
+            and tcp_fast_login_rejection_should_retry(exc, tcp_elapsed_ms)
+        )
         results["tcp"].update(
             {
                 "error": message,
-                "credential_rejected": tcp_login_was_rejected(exc),
+                "credential_rejected": bool(
+                    tcp_login_was_rejected(exc)
+                    and not rate_limit_suspected
+                    and not retryable_fast_rejection
+                ),
+                "rate_limit_suspected": rate_limit_suspected,
+                "retryable_fast_rejection": retryable_fast_rejection,
+                "rejection_command": getattr(exc, "garena_command", 0),
+                "rejection_result": getattr(exc, "garena_result", 0),
             }
         )
 
@@ -1034,7 +1142,11 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
     results["credential_valid"] = True if tcp_ok else (
         False if results["tcp"].get("credential_rejected") else None
     )
-    if results["tcp"].get("credential_rejected"):
+    if (
+        results["tcp"].get("credential_rejected")
+        or results["tcp"].get("rate_limit_suspected")
+        or results["tcp"].get("retryable_fast_rejection")
+    ):
         results["elapsed_ms"] = round((time.monotonic() - started) * 1000)
         password = ""
         return results
@@ -1079,6 +1191,11 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             "stage": "tcp_sso_probe_oauth",
             "error": None if player_api.get("ok") else str(oauth_chain.get("error") or "kientuong_probe_failed"),
         }
+
+        if result_rate_limit_suspected(results):
+            password = ""
+            results["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+            return results
 
     kientuong_complete = kientuong_player_has_level(player_api)
 
@@ -1139,6 +1256,10 @@ def run_api_tests(tcp_module: Any, account: str, password: str, timeout: float) 
             kientuong_attempts += 1
             try:
                 kientuong_auth, web_player = _do_kientuong()
+                if result_rate_limit_suspected(
+                    {"auth": kientuong_auth, "player": web_player}
+                ):
+                    break
                 if kientuong_no_character_response(web_player):
                     no_character_responses += 1
             except Exception as exc:
@@ -1173,6 +1294,11 @@ def format_user_output(result: dict[str, Any]) -> str:
     """Return only account and Kiện Tướng data on one ``||``-delimited line."""
 
     tcp = result.get("tcp") or {}
+    if result_rate_limit_suspected(result):
+        return (
+            f"Tài khoản: {str(tcp.get('account') or 'không có')}"
+            " || Trạng thái: CHƯA THỂ CHECK || Lỗi: nghi rate limit"
+        )
     if tcp.get("credential_rejected"):
         return (
             f"Tài khoản: {str(tcp.get('account') or 'không có')}"
@@ -1387,6 +1513,12 @@ def batch_login_rejected_permanently(result: Any) -> bool:
     return bool((result.get("tcp") or {}).get("credential_rejected"))
 
 
+def batch_rate_limit_suspected(result: Any) -> bool:
+    """Return true for any TCP/HTTP/API signal that plausibly means throttling."""
+
+    return result_rate_limit_suspected(result)
+
+
 def batch_required_missing(result: Any) -> list[str]:
     """Chi can Kien Tuong - Ctnv hoac co level moi la du."""
 
@@ -1490,6 +1622,7 @@ def batch_check_one(
     attempt_error = ""
     retry_stopped = False
     login_rejected = False
+    rate_limit_suspected = False
     gave_up_reason = ""
     missing: list[str] = []
     effective_timeout = min(float(timeout), BATCH_MAX_REQUEST_TIMEOUT)
@@ -1506,6 +1639,9 @@ def batch_check_one(
             result = current_result
             attempt_error = ""
             missing = batch_required_missing(current_result)
+            if batch_rate_limit_suspected(current_result):
+                rate_limit_suspected = True
+                break
             if batch_login_rejected_permanently(current_result):
                 login_rejected = True
                 break
@@ -1528,7 +1664,7 @@ def batch_check_one(
             )
             break
         backoff = min(1.5 * attempt_count, 8.0)
-        # FAIL nhanh (< 500ms) thường là rate limit/connection - đợi lâu hơn
+        # Phản hồi quá nhanh có thể chưa đáng tin cậy - đợi lâu hơn rồi check lại.
         elapsed_so_far = time.monotonic() - started
         if elapsed_so_far < 0.5 * attempt_count:
             backoff = max(backoff, 3.0)
@@ -1672,7 +1808,16 @@ def batch_check_one(
         # Network failures, timeouts and incomplete API data remain retryable.
         tcp_ok = bool(tcp_info.get("ok"))
         row["status"] = "OK" if tcp_ok else "CHƯA THỂ CHECK"
-        if login_rejected:
+        if rate_limit_suspected:
+            errors.insert(0, "nghi rate limit - chưa thể kết luận đăng nhập")
+            row["status"] = "CHƯA THỂ CHECK"
+            row["result_type"] = "Chưa thể check"
+            print(
+                f"  [{credential.index}] #{credential.account[:20]} => "
+                "CHUA THE CHECK (nghi rate limit)",
+                flush=True,
+            )
+        elif login_rejected:
             errors.insert(
                 0,
                 "FALSE - không thể đăng nhập (TCP từ chối), dừng ngay",
@@ -1905,7 +2050,7 @@ tr.ok .badge{background:#1a7f37;color:#fff}tr.fail .badge{background:#da3633;col
 <div id="batchTiming" class="fileinfo">Thời gian: chưa bắt đầu.</div>
 <div class="wrap"><table><thead><tr><th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID Garena</th><th>Tên Kiện Tướng</th><th>Cấp</th><th>Trạng thái Kiện Tướng</th><th>ms</th></tr></thead>
 <tbody id="batchBody"></tbody></table></div>
-<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. Khi TCP từ chối rõ ràng, kết quả là <code>FAIL / Không thể log</code>; kết quả này không tự nó chứng minh mật khẩu sai. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 100 lần thử hoặc 300 giây được đánh <code>CHƯA THỂ CHECK</code>. XLSX có sáu tab, gồm <code>Không thể log</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
+<small>Kết quả hiển thị trực tiếp khi từng tài khoản xong. TCP từ chối tại LOGIN_PREPARE được đánh <code>FAIL / Không thể log</code>. HTTP 429 hoặc thông báo rate limit/throttling được đánh ngay <code>CHƯA THỂ CHECK</code>. LOGIN phản hồi dưới 600 ms chưa được kết luận mà sẽ chờ rồi kiểm tra lại; chỉ LOGIN từ chối không quá nhanh và không có dấu hiệu rate limit mới là <code>FAIL / Không thể log</code>. Timeout, lỗi mạng/OAuth hoặc dữ liệu thiếu sau tối đa 100 lần thử hoặc 300 giây được đánh <code>CHƯA THỂ CHECK</code>. XLSX có sáu tab, gồm <code>Không thể log</code> và <code>Chưa thể check</code>; cột Tài khoản trong mỗi tab có dạng <code>user|pass</code>. Bấm "Dừng" để kết thúc sớm.</small>
 
 <div id="splitSection" style="display:none;margin-top:18px">
 <h2 id="splitTitle" style="color:#58a6ff;margin:0 0 10px;font-size:16px"></h2>
@@ -2545,6 +2690,30 @@ def main() -> int:
             raise SystemExit("SELF-TEST FAIL: no-character response rejected")
         if kientuong_no_character_response({"ok": False, "status": 429, "body": {}}):
             raise SystemExit("SELF-TEST FAIL: rate limit treated as no character")
+        if not batch_rate_limit_suspected({"apis": {"player": {"status": 429}}}):
+            raise SystemExit("SELF-TEST FAIL: HTTP 429 rate limit not detected")
+        test_rejection = RuntimeError("Garena từ chối ở bước LOGIN (lệnh 0x101), mã 1")
+        test_rejection.garena_rejected = True
+        test_rejection.garena_command = 0x101
+        test_rejection.garena_result = 1
+        if tcp_rate_limit_suspected(test_rejection, 250):
+            raise SystemExit("SELF-TEST FAIL: fast TCP rejection treated as rate limit")
+        if not tcp_fast_login_rejection_should_retry(test_rejection, 250):
+            raise SystemExit("SELF-TEST FAIL: fast TCP rejection not retried")
+        if tcp_rate_limit_suspected(test_rejection, 900):
+            raise SystemExit("SELF-TEST FAIL: slow TCP rejection treated as rate limit")
+        if tcp_fast_login_rejection_should_retry(test_rejection, 900):
+            raise SystemExit("SELF-TEST FAIL: slow TCP rejection retried")
+        test_prepare_rejection = RuntimeError(
+            "Garena từ chối ở bước LOGIN_PREPARE (lệnh 0x100), mã 1"
+        )
+        test_prepare_rejection.garena_rejected = True
+        test_prepare_rejection.garena_command = 0x100
+        test_prepare_rejection.garena_result = 1
+        if tcp_rate_limit_suspected(test_prepare_rejection, 100):
+            raise SystemExit("SELF-TEST FAIL: LOGIN_PREPARE treated as rate limit")
+        if not tcp_login_was_rejected(test_prepare_rejection):
+            raise SystemExit("SELF-TEST FAIL: LOGIN_PREPARE not treated as login failure")
         if configured_server_ports([5555, 5556, 5555]) != [5555, 5556]:
             raise SystemExit("SELF-TEST FAIL: repeated HTTP ports")
         if configured_server_ports(None, ports_env="5555, 6000") != [5555, 6000]:

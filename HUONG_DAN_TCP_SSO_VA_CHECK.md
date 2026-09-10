@@ -17,7 +17,7 @@ user|pass
   -> hủy dữ liệu phiên bí mật
 ```
 
-`LOGIN_PREPARE` nhận dữ liệu chuẩn bị (salt/verify code) để tạo payload login. Lỗi hoặc từ chối tại bước này có thể là rate limit; không được kết luận là sai mật khẩu.
+`LOGIN_PREPARE` nhận dữ liệu chuẩn bị (salt/verify code) để tạo payload login. Nếu TCP từ chối ngay tại bước này, hệ thống ghi `FAIL / Không thể log`.
 
 Khi server từ chối rõ ràng tại `LOGIN`, kết quả là `FAIL / Không thể log`. Nhãn này không tự nó khẳng định mật khẩu sai. Login thành công trả về UID và `session_key` TCP dài 16 byte.
 
