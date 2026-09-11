@@ -149,10 +149,26 @@ body {
   font-size: 20px;
   font-weight: 900;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #DC2626 0%, #EA580C 50%, #D97706 100%);
+  background: linear-gradient(105deg, #DC2626 0%, #EA580C 28%, #FBBF24 46%, #EA580C 64%, #D97706 100%);
+  background-size: 240% 100%;
+  background-position: 0% 50%;
+  background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   line-height: 1.2;
+  animation: brandTitleShimmer 4.2s ease-in-out infinite;
+  will-change: background-position, filter;
+}
+
+@keyframes brandTitleShimmer {
+  0%, 100% {
+    background-position: 0% 50%;
+    filter: drop-shadow(0 0 0 rgba(234, 88, 12, 0));
+  }
+  50% {
+    background-position: 100% 50%;
+    filter: drop-shadow(0 2px 5px rgba(234, 88, 12, 0.22));
+  }
 }
 
 .brand-subtitle {
@@ -1309,6 +1325,7 @@ table.data-table tbody tr:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .brand-title,
   .workspace.detail-open .jobs-card,
   .jobs-card.list-expand,
   .detail-card.detail-enter,
