@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import sys
@@ -22,6 +23,8 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +40,8 @@ DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
+MAX_SATELLITE_TARGETS = 50
+SATELLITE_HEALTH_TIMEOUT = 20
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
 MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
@@ -78,6 +83,10 @@ CREATE TABLE IF NOT EXISTS results (
     reported_at REAL NOT NULL,
     UNIQUE(chunk_id, account)
 );
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_chunks_claim ON chunks(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_chunk ON results(chunk_id);
@@ -118,6 +127,10 @@ CREATE TABLE IF NOT EXISTS results (
     row_json TEXT NOT NULL,
     reported_at DOUBLE PRECISION NOT NULL,
     UNIQUE(chunk_id, account)
+);
+CREATE TABLE IF NOT EXISTS app_settings (
+    setting_key TEXT PRIMARY KEY,
+    setting_value TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_chunks_claim ON chunks(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
@@ -732,6 +745,94 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str) -> tu
 
 
 _UI_FILE = Path(__file__).parent / "master_ui.html"
+_ADMIN_UI_FILE = Path(__file__).parent / "master_admin.html"
+
+DEFAULT_NOTICE_TITLE = "⚠️ CHÍNH SÁCH HỆ THỐNG & LƯU Ý CHECK:"
+DEFAULT_NOTICE_BODY = (
+    "Dữ liệu job và kết quả được lưu tối đa 2 ngày (hôm nay & hôm qua). Sau thời gian này "
+    "hệ thống tự dọn dẹp sạch, kể cả Admin cũng không thể khôi phục.\n"
+    "• Tool check không sử dụng proxy: chỉ khuyến khích check thông tin xấu và mailxt. "
+    "Nếu TTT sau khi check mà lpass, Admin không chịu trách nhiệm.\n"
+    "• Nếu gặp tài khoản bị treo quá lâu không trả kết quả, hãy bấm nút Dừng đơn và tạo đơn mới "
+    "để tránh nghẽn tiến trình."
+)
+DEFAULT_SATELLITE_TARGETS = "[checkpass3] https://checkpass3-wt3z.onrender.com/\n"
+
+
+def _setting(store: Any, key: str, default: str = "") -> str:
+    row = store.fetchone("SELECT setting_value FROM app_settings WHERE setting_key=?", (key,))
+    return str(row[0]) if row and row[0] is not None else default
+
+
+def _save_settings(store: Any, values: dict[str, str]) -> None:
+    store.batch([
+        {
+            "sql": (
+                "INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?) "
+                "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value"
+            ),
+            "args": (key, value),
+        }
+        for key, value in values.items()
+    ])
+
+
+def parse_satellite_targets(text: str) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for number, line in enumerate(text.splitlines(), 1):
+        match = re.search(r"https?://[^\s]+", line, flags=re.IGNORECASE)
+        if not match:
+            continue
+        url = match.group(0).rstrip("/.,;)")
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
+                continue
+            # URL cấu hình không được chứa user/password.
+            if parsed.username or parsed.password:
+                continue
+            _ = parsed.port
+        except ValueError:
+            continue
+        normalized_url = url.lower().rstrip("/")
+        if normalized_url in seen_urls:
+            continue
+        seen_urls.add(normalized_url)
+        named = re.search(r"\[([^]]+)\]", line)
+        label = (named.group(1).strip() if named else "") or parsed.hostname or f"satellite-{number:02}"
+        result.append({"label": label[:80], "url": url[:2048]})
+        if len(result) >= MAX_SATELLITE_TARGETS:
+            break
+    return result
+
+
+def fetch_satellite_health(target: dict[str, str]) -> dict[str, Any]:
+    started = time.monotonic()
+    base_url = target["url"].rstrip("/")
+    parsed = urllib.parse.urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    health_path = base_path if base_path.endswith("/healthz") else base_path + "/healthz"
+    health_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, health_path or "/healthz", "", ""))
+    request = urllib.request.Request(
+        health_url,
+        headers={"User-Agent": "Mozilla/5.0 CheckpassMasterHealthMonitor/1.0", "Accept": "application/json"},
+    )
+    result: dict[str, Any] = {**target, "health_url": health_url, "checked_at": _now()}
+    try:
+        with urllib.request.urlopen(request, timeout=SATELLITE_HEALTH_TIMEOUT) as response:
+            raw = response.read(1024 * 1024).decode("utf-8", "replace")
+            data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Health không trả JSON object")
+        result.update({"online": bool(data.get("ok")), "health": data, "error": ""})
+    except urllib.error.HTTPError as exc:
+        body = exc.read(300).decode("utf-8", "replace")
+        result.update({"online": False, "health": {}, "error": f"HTTP {exc.code}: {body}"[:300]})
+    except Exception as exc:
+        result.update({"online": False, "health": {}, "error": str(exc)[:300]})
+    result["latency_ms"] = round((time.monotonic() - started) * 1000)
+    return result
 
 
 def _get_page_html() -> str:
@@ -741,6 +842,15 @@ def _get_page_html() -> str:
         except Exception as exc:
             print(f"[master] Lỗi đọc master_ui.html: {exc}", flush=True)
     return """<!doctype html><html><body><h1>CHECK.SP1S.SHOP</h1><p>Vui lòng kiểm tra file master_ui.html</p></body></html>"""
+
+
+def _get_admin_page_html() -> str:
+    if _ADMIN_UI_FILE.is_file():
+        try:
+            return _ADMIN_UI_FILE.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(f"[master] Lỗi đọc master_admin.html: {exc}", flush=True)
+    return """<!doctype html><html><body><h1>Quản trị CHECK.SP1S.SHOP</h1><p>Vui lòng kiểm tra file master_admin.html</p></body></html>"""
 
 
 _PAGE_HTML = _get_page_html()
@@ -844,6 +954,15 @@ class MasterHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ (MASTER_TOKEN không khớp)"})
         return None
 
+    def _require_admin(self) -> dict[str, Any] | None:
+        """Chỉ chấp nhận MASTER_TOKEN thật cho các chức năng quản trị."""
+        master_token = (self.server.master_token or "").strip()
+        auth = self._get_auth_info()
+        if not master_token or not auth.get("is_admin"):
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "chỉ MASTER_TOKEN mới được truy cập trang quản trị"})
+            return None
+        return auth
+
     def _security_headers(self, content_type: str) -> None:
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store, max-age=0")
@@ -917,6 +1036,17 @@ class MasterHandler(BaseHTTPRequestHandler):
                     "license_url": lu[:60] if lu else "empty",
                 })
                 return
+            if path == "/api/public/notice":
+                enabled = _setting(self.server.store, "notice_enabled", "1") != "0"
+                self._json(HTTPStatus.OK, {
+                    "ok": True,
+                    "notice": {
+                        "enabled": enabled,
+                        "title": _setting(self.server.store, "notice_title", DEFAULT_NOTICE_TITLE),
+                        "body": _setting(self.server.store, "notice_body", DEFAULT_NOTICE_BODY),
+                    },
+                })
+                return
             if path == "/api/verify":
                 # Endpoint để frontend kiểm tra license key: ?key=xxx hoặc Authorization Bearer
                 tok = self._extract_token()
@@ -938,6 +1068,14 @@ class MasterHandler(BaseHTTPRequestHandler):
                 return
             if path == "/" or path == "/index.html":
                 self._html(_get_page_html())
+                return
+            if path == "/admin" or path == "/admin.html":
+                self._html(_get_admin_page_html())
+                return
+            if path == "/api/admin/settings":
+                if self._require_admin() is None:
+                    return
+                self._handle_admin_settings_get()
                 return
             if path == "/api/admin/prune_before_today":
                 self._handle_prune_before_today()
@@ -1003,6 +1141,16 @@ class MasterHandler(BaseHTTPRequestHandler):
             # Phân biệt endpoint user vs vệ tinh
             if path == "/api/admin/clear_all":
                 self._handle_clear_all_data()
+                return
+            if path == "/api/admin/settings":
+                if self._require_admin() is None:
+                    return
+                self._handle_admin_settings_save()
+                return
+            if path == "/api/admin/satellites/health":
+                if self._require_admin() is None:
+                    return
+                self._handle_satellite_health()
                 return
             if path == "/api/jobs":
                 auth = self._require_user()
@@ -1078,6 +1226,92 @@ class MasterHandler(BaseHTTPRequestHandler):
                 pass
 
     # --- handlers -----------------------------------------------------
+
+    def _handle_admin_settings_get(self) -> None:
+        store = self.server.store
+        targets_text = _setting(store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "notice": {
+                "enabled": _setting(store, "notice_enabled", "1") != "0",
+                "title": _setting(store, "notice_title", DEFAULT_NOTICE_TITLE),
+                "body": _setting(store, "notice_body", DEFAULT_NOTICE_BODY),
+            },
+            "satellite_targets": targets_text,
+            "satellite_count": len(parse_satellite_targets(targets_text)),
+        })
+
+    def _handle_admin_settings_save(self) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "JSON phải là object"})
+            return
+        notice = body.get("notice")
+        targets_value = body.get("satellite_targets")
+        values: dict[str, str] = {}
+        if notice is not None:
+            if not isinstance(notice, dict):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "notice không hợp lệ"})
+                return
+            title = str(notice.get("title") or "").strip()
+            content = str(notice.get("body") or "").strip()
+            if not title or len(title) > 200:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "tiêu đề thông báo cần 1-200 ký tự"})
+                return
+            if not content or len(content) > 5000:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "nội dung thông báo cần 1-5000 ký tự"})
+                return
+            values.update({
+                "notice_enabled": "1" if bool(notice.get("enabled", True)) else "0",
+                "notice_title": title,
+                "notice_body": content,
+            })
+        if targets_value is not None:
+            targets_text = str(targets_value).strip()
+            if len(targets_text) > 20000:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "danh sách vệ tinh quá dài"})
+                return
+            targets = parse_satellite_targets(targets_text)
+            if targets_text and not targets:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không tìm thấy URL http/https hợp lệ"})
+                return
+            normalized = "\n".join(f"[{target['label']}] {target['url']}" for target in targets)
+            values["satellite_targets"] = normalized + ("\n" if normalized else "")
+        if not values:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không có cấu hình để lưu"})
+            return
+        _save_settings(self.server.store, values)
+        self._json(HTTPStatus.OK, {"ok": True, "saved": list(values)})
+
+    def _handle_satellite_health(self) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict):
+            body = {}
+        targets_text = str(body.get("satellite_targets") or "").strip()
+        if not targets_text:
+            targets_text = _setting(self.server.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+        if len(targets_text) > 20000:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "danh sách vệ tinh quá dài"})
+            return
+        targets = parse_satellite_targets(targets_text)
+        indexed_results: dict[int, dict[str, Any]] = {}
+        if targets:
+            with ThreadPoolExecutor(max_workers=min(12, len(targets))) as pool:
+                futures = {pool.submit(fetch_satellite_health, target): index for index, target in enumerate(targets)}
+                for future in as_completed(futures):
+                    index = futures[future]
+                    try:
+                        indexed_results[index] = future.result()
+                    except Exception as exc:
+                        indexed_results[index] = {**targets[index], "online": False, "health": {}, "error": str(exc)[:300]}
+        results = [indexed_results[index] for index in range(len(targets))]
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "checked_at": _now(),
+            "online": sum(1 for item in results if item.get("online")),
+            "total": len(results),
+            "satellites": results,
+        })
 
     def _handle_clear_all_data(self) -> None:
         """Xóa toàn bộ dữ liệu điều phối; chỉ MASTER_TOKEN mới được phép gọi."""
@@ -2032,6 +2266,10 @@ def main() -> int:
         assert [len(c) for c in chunks] == [2, 1]
         dup = parse_accounts("a|1\na:2")
         assert len(dup) == 2
+        targets = parse_satellite_targets("[one] https://one.example/\nhttps://two.example\nhttps://ONE.example")
+        assert [(target["label"], target["url"]) for target in targets] == [
+            ("one", "https://one.example"), ("two.example", "https://two.example")
+        ]
         print("SELF-TEST OK: master parse/split."); return 0
 
     # Chọn store: PostgreSQL VPS, Turso cloud, hoặc SQLite local.

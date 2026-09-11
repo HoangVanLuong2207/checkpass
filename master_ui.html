@@ -349,6 +349,9 @@ body {
   align-items: stretch;
   margin: 20px 0 22px;
 }
+.top-section-row.notice-hidden {
+  grid-template-columns: 1fr;
+}
 
 /* Banner / Notice */
 .notice-box {
@@ -381,6 +384,14 @@ body {
 }
 .notice-content strong {
   color: #92400E;
+}
+.notice-title {
+  color: #92400E;
+  font-weight: 800;
+  margin-bottom: 5px;
+}
+.notice-body {
+  white-space: pre-line;
 }
 .notice-badges {
   display: flex;
@@ -1293,6 +1304,10 @@ table.data-table tbody tr:hover {
         <i class="fa-solid fa-trash-can"></i> Xóa Tất Cả
       </button>
 
+      <button class="btn btn-info btn-sm" id="adminPageBtn" style="display:none" onclick="openAdminPage()" title="Quản lý thông báo và server vệ tinh">
+        <i class="fa-solid fa-sliders"></i> Quản Trị
+      </button>
+
       <button class="btn btn-secondary btn-sm" onclick="changeKey()" title="Cài đặt License Key">
         <i class="fa-solid fa-shield-halved"></i> Đổi Key
       </button>
@@ -1302,20 +1317,16 @@ table.data-table tbody tr:hover {
 
 <div class="container">
   <!-- Top Section Row: Notice + Overview Stats (2x2) -->
-  <div class="top-section-row">
+  <div class="top-section-row" id="topSectionRow">
     <!-- System Notice Banner -->
     <div class="notice-box" id="noticeBox">
       <div class="notice-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
       <div class="notice-content">
         <div>
-          <div>
-            <strong>⚠️ CHÍNH SÁCH HỆ THỐNG &amp; LƯU Ý CHECK:</strong>
-            Dữ liệu job và kết quả được lưu tối đa <strong>2 ngày</strong> (hôm nay &amp; hôm qua). Sau thời gian này hệ thống tự dọn dẹp sạch, kể cả Admin cũng không thể khôi phục.
-          </div>
-          <div style="margin-top:6px;color:#92400E">
-            • Tool check không sử dụng proxy: chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau khi check mà lpass, Admin không chịu trách nhiệm.<br>
-            • Nếu gặp tài khoản bị treo quá lâu không trả kết quả, hãy bấm nút <strong>Dừng đơn</strong> và tạo đơn mới để tránh nghẽn tiến trình.
-          </div>
+          <div class="notice-title" id="noticeTitle">⚠️ CHÍNH SÁCH HỆ THỐNG &amp; LƯU Ý CHECK:</div>
+          <div class="notice-body" id="noticeBody">Dữ liệu job và kết quả được lưu tối đa 2 ngày (hôm nay &amp; hôm qua). Sau thời gian này hệ thống tự dọn dẹp sạch, kể cả Admin cũng không thể khôi phục.
+• Tool check không sử dụng proxy: chỉ khuyến khích check thông tin xấu và mailxt. Nếu TTT sau khi check mà lpass, Admin không chịu trách nhiệm.
+• Nếu gặp tài khoản bị treo quá lâu không trả kết quả, hãy bấm nút Dừng đơn và tạo đơn mới để tránh nghẽn tiến trình.</div>
         </div>
         <div class="notice-badges">
           <span class="notice-tag"><i class="fa-regular fa-clock"></i> Lưu trữ: 48h</span>
@@ -1653,6 +1664,31 @@ function updateOwnerBadge() {
 function setClearAllButton(visible) {
   const btn = document.getElementById('clearAllDataBtn');
   if (btn) btn.style.display = visible ? 'inline-flex' : 'none';
+  const adminBtn = document.getElementById('adminPageBtn');
+  if (adminBtn) adminBtn.style.display = visible ? 'inline-flex' : 'none';
+}
+
+function openAdminPage() {
+  window.location.href = '/admin';
+}
+
+async function loadPublicNotice() {
+  try {
+    const response = await fetch('/api/public/notice', { cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok || !data.ok || !data.notice) return;
+    const notice = data.notice;
+    const box = document.getElementById('noticeBox');
+    if (box) box.style.display = notice.enabled === false ? 'none' : 'flex';
+    const row = document.getElementById('topSectionRow');
+    if (row) row.classList.toggle('notice-hidden', notice.enabled === false);
+    const title = document.getElementById('noticeTitle');
+    const body = document.getElementById('noticeBody');
+    if (title) title.textContent = notice.title || '';
+    if (body) body.textContent = notice.body || '';
+  } catch (_) {
+    // Giữ nội dung mặc định nếu mạng tạm thời lỗi.
+  }
 }
 
 function changeKey() {
@@ -1722,6 +1758,7 @@ async function checkKey() {
   }
 }
 
+loadPublicNotice();
 updateOwnerBadge();
 if (TOKEN) checkKey();
 
