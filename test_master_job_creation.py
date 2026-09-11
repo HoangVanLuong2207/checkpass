@@ -155,6 +155,26 @@ class JobCreationRaceTest(unittest.TestCase):
             "processed_accounts": 2,
         })
 
+    def test_notice_html_and_css_can_be_saved(self) -> None:
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        captured: list[tuple[int, dict]] = []
+        notice_html = '<div class="notice-title">Bảo trì</div><div>Thông báo mới</div>'
+        notice_css = '#noticeBox { background: #fff; }'
+        handler._read_json = lambda: {
+            "notice": {"enabled": True, "html": notice_html, "css": notice_css},
+        }
+        handler._json = lambda status, payload: captured.append((status, payload))
+
+        handler._handle_admin_settings_save()
+        self.assertEqual(captured[-1][0], 200)
+        handler._handle_admin_settings_get()
+
+        returned = captured[-1][1]["notice"]
+        self.assertEqual(returned["html"], notice_html)
+        self.assertEqual(returned["css"], notice_css)
+        self.assertTrue(returned["enabled"])
+
 
 if __name__ == "__main__":
     unittest.main()

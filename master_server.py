@@ -12,6 +12,7 @@ import asyncio
 import csv
 from datetime import datetime, timedelta, timezone
 import hashlib
+import html
 import io
 import json
 import os
@@ -763,6 +764,30 @@ def _setting(store: Any, key: str, default: str = "") -> str:
     return str(row[0]) if row and row[0] is not None else default
 
 
+def _notice_payload(store: Any) -> dict[str, Any]:
+    """Return editable HTML/CSS, falling back to the old title/body settings."""
+    title = _setting(store, "notice_title", DEFAULT_NOTICE_TITLE)
+    body = _setting(store, "notice_body", DEFAULT_NOTICE_BODY)
+    notice_html = _setting(store, "notice_html", "").strip()
+    if not notice_html:
+        notice_html = (
+            '<div><div class="notice-title">' + html.escape(title) + '</div>'
+            '<div class="notice-body">' + html.escape(body) + '</div></div>'
+            '<div class="notice-badges">'
+            '<span class="notice-tag"><i class="fa-regular fa-clock"></i> Lưu trữ: 48h</span>'
+            '<span class="notice-tag"><i class="fa-solid fa-bolt"></i> Siêu tốc độ TCP</span>'
+            '<span class="notice-tag"><i class="fa-solid fa-shield"></i> Mã hóa an toàn</span>'
+            '</div>'
+        )
+    return {
+        "enabled": _setting(store, "notice_enabled", "1") != "0",
+        "title": title,
+        "body": body,
+        "html": notice_html,
+        "css": _setting(store, "notice_css", ""),
+    }
+
+
 def _save_settings(store: Any, values: dict[str, str]) -> None:
     store.batch([
         {
@@ -1035,14 +1060,9 @@ class MasterHandler(BaseHTTPRequestHandler):
                 })
                 return
             if path == "/api/public/notice":
-                enabled = _setting(self.server.store, "notice_enabled", "1") != "0"
                 self._json(HTTPStatus.OK, {
                     "ok": True,
-                    "notice": {
-                        "enabled": enabled,
-                        "title": _setting(self.server.store, "notice_title", DEFAULT_NOTICE_TITLE),
-                        "body": _setting(self.server.store, "notice_body", DEFAULT_NOTICE_BODY),
-                    },
+                    "notice": _notice_payload(self.server.store),
                 })
                 return
             if path == "/api/verify":
@@ -1230,11 +1250,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         targets_text = _setting(store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
         self._json(HTTPStatus.OK, {
             "ok": True,
-            "notice": {
-                "enabled": _setting(store, "notice_enabled", "1") != "0",
-                "title": _setting(store, "notice_title", DEFAULT_NOTICE_TITLE),
-                "body": _setting(store, "notice_body", DEFAULT_NOTICE_BODY),
-            },
+            "notice": _notice_payload(store),
             "satellite_targets": targets_text,
             "satellite_count": len(parse_satellite_targets(targets_text)),
         })
@@ -1251,19 +1267,35 @@ class MasterHandler(BaseHTTPRequestHandler):
             if not isinstance(notice, dict):
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "notice không hợp lệ"})
                 return
-            title = str(notice.get("title") or "").strip()
-            content = str(notice.get("body") or "").strip()
-            if not title or len(title) > 200:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "tiêu đề thông báo cần 1-200 ký tự"})
-                return
-            if not content or len(content) > 5000:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "nội dung thông báo cần 1-5000 ký tự"})
-                return
-            values.update({
-                "notice_enabled": "1" if bool(notice.get("enabled", True)) else "0",
-                "notice_title": title,
-                "notice_body": content,
-            })
+            if "html" in notice or "css" in notice:
+                notice_html = str(notice.get("html") or "").strip()
+                notice_css = str(notice.get("css") or "").strip()
+                if not notice_html or len(notice_html) > 20000:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "HTML thông báo cần 1-20.000 ký tự"})
+                    return
+                if len(notice_css) > 20000:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "CSS thông báo tối đa 20.000 ký tự"})
+                    return
+                values.update({
+                    "notice_enabled": "1" if bool(notice.get("enabled", True)) else "0",
+                    "notice_html": notice_html,
+                    "notice_css": notice_css,
+                })
+            else:
+                # Giữ tương thích với giao diện/API cũ trong lúc các bản deploy chuyển tiếp.
+                title = str(notice.get("title") or "").strip()
+                content = str(notice.get("body") or "").strip()
+                if not title or len(title) > 200:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "tiêu đề thông báo cần 1-200 ký tự"})
+                    return
+                if not content or len(content) > 5000:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "nội dung thông báo cần 1-5000 ký tự"})
+                    return
+                values.update({
+                    "notice_enabled": "1" if bool(notice.get("enabled", True)) else "0",
+                    "notice_title": title,
+                    "notice_body": content,
+                })
         if targets_value is not None:
             targets_text = str(targets_value).strip()
             targets = parse_satellite_targets(targets_text)
