@@ -2,6 +2,7 @@
 import argparse
 import base64
 import csv
+import functools
 import hashlib
 import json
 import os
@@ -162,6 +163,7 @@ def result_rate_limit_suspected(result: Any) -> bool:
     return scan(result)
 
 
+@functools.lru_cache(maxsize=4)
 def resilient_tcp_client_type(tcp_module: Any) -> type:
     """Accept server-push frames while waiting for the requested command response."""
 
@@ -464,10 +466,13 @@ class WebSession:
         except urllib.error.HTTPError as exc:
             response = exc
 
-        raw = response.read(2 * 1024 * 1024)
-        status = int(response.status)
-        final_url = response.geturl()
-        content_type = response.headers.get("Content-Type", "")
+        try:
+            raw = response.read(2 * 1024 * 1024)
+            status = int(response.status)
+            final_url = response.geturl()
+            content_type = response.headers.get("Content-Type", "")
+        finally:
+            response.close()
         text = raw.decode("utf-8", "replace")
         try:
             body: Any = json.loads(text)
