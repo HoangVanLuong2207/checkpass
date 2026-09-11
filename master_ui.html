@@ -52,6 +52,8 @@
   --radius-lg: 20px;
   --detail-motion-duration: 300ms;
   --detail-motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
+  --jobs-expand-duration: 480ms;
+  --jobs-expand-easing: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 * {
@@ -485,7 +487,7 @@ body {
   animation: jobsColumnSettle var(--detail-motion-duration) var(--detail-motion-easing) both;
 }
 .jobs-card.list-expand {
-  animation: jobsColumnExpand var(--detail-motion-duration) var(--detail-motion-easing) both;
+  animation: jobsColumnExpand var(--jobs-expand-duration) var(--jobs-expand-easing) both;
 }
 
 /* Cards */
@@ -732,8 +734,8 @@ body {
   to { opacity: 1; transform: translateX(0); }
 }
 @keyframes jobsColumnExpand {
-  from { opacity: 0.9; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0.92; clip-path: inset(0 60% 0 0 round var(--radius)); }
+  to { opacity: 1; clip-path: inset(0 0 0 0 round var(--radius)); }
 }
 .detail-head-top {
   display: flex;
@@ -1265,6 +1267,9 @@ table.data-table tbody tr:hover {
   .detail-card {
     position: static;
   }
+  .jobs-card.list-expand {
+    animation: none;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1594,6 +1599,7 @@ let detailRequestSeq = 0;
 let detailTransitionTimer = null;
 let pendingJobId = null;
 const DETAIL_TRANSITION_MS = 300;
+const JOBS_EXPAND_MS = 480;
 let jobsCache = [];
 let jobsLoading = false;
 let currentRawRows = [];
@@ -2035,6 +2041,10 @@ function detailMotionDelay() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : DETAIL_TRANSITION_MS;
 }
 
+function jobsExpandDelay() {
+  return window.matchMedia('(prefers-reduced-motion: reduce), (max-width: 1024px)').matches ? 0 : JOBS_EXPAND_MS;
+}
+
 function restartDetailAnimation(detailCard, className) {
   detailCard.classList.remove('detail-enter', 'detail-leave');
   void detailCard.offsetWidth;
@@ -2078,7 +2088,7 @@ function finishDetailExit() {
     jobsCard.classList.remove('list-expand');
     void jobsCard.offsetWidth;
     jobsCard.classList.add('list-expand');
-    setTimeout(() => jobsCard.classList.remove('list-expand'), detailMotionDelay());
+    setTimeout(() => jobsCard.classList.remove('list-expand'), jobsExpandDelay());
   }
 }
 
