@@ -1362,8 +1362,8 @@ table.data-table tbody tr:hover {
       <div class="overview-card">
         <div class="overview-icon accounts"><i class="fa-solid fa-users"></i></div>
         <div class="overview-info">
-          <div class="overview-num" id="topTotalAccs">0</div>
-          <div class="overview-label">Tổng tài khoản · toàn hệ thống</div>
+          <div class="overview-num" id="topTotalAccs">0 / 0</div>
+          <div class="overview-label">Tài khoản Tổng / Đã xong · toàn hệ thống</div>
         </div>
       </div>
     </div>
@@ -1880,17 +1880,19 @@ function updateOverviewStats(jobs, overview) {
   let running = hasSystemOverview ? Number(overview.running_jobs || 0) : 0;
   let done = hasSystemOverview ? Number(overview.done_jobs || 0) : 0;
   let totalAccs = hasSystemOverview ? Number(overview.total_accounts || 0) : 0;
+  let processedAccs = hasSystemOverview ? Number(overview.processed_accounts || 0) : 0;
   if (!hasSystemOverview) {
     jobs.forEach(j => {
       if (j.status === 'done') done++;
       else running++;
       totalAccs += Number(j.total || 0);
+      processedAccs += Number(j.processed || 0);
     });
   }
   document.getElementById('topTotalJobs').textContent = formatNumber(totalJobs);
   document.getElementById('topRunningJobs').textContent = formatNumber(running);
   document.getElementById('topDoneJobs').textContent = formatNumber(done);
-  document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs);
+  document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs) + ' / ' + formatNumber(processedAccs);
 }
 
 function filterJobsList() {

@@ -1406,6 +1406,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "running_jobs": int((overview_row[1] if overview_row else 0) or 0),
             "done_jobs": int((overview_row[2] if overview_row else 0) or 0),
             "total_accounts": int((overview_row[3] if overview_row else 0) or 0),
+            "processed_accounts": int((store.fetchone("SELECT COUNT(*) FROM results") or [0])[0] or 0),
         }
         # Nếu admin (MASTER_TOKEN) hoặc owner rỗng (legacy/dev) thì xem tất cả
         if is_admin or not owner_hash:

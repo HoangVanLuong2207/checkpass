@@ -118,13 +118,21 @@ class JobCreationRaceTest(unittest.TestCase):
         )
 
     def test_regular_key_gets_global_overview_but_only_its_job_list(self) -> None:
-        self.inner.exec(
+        owner_a_job = self.inner.exec(
             "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
             (1, 100, 15, "open", "owner-a", "key-a"),
         )
-        self.inner.exec(
+        owner_b_job = self.inner.exec(
             "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
             (2, 250, 15, "done", "owner-b", "key-b"),
+        )
+        self.inner.exec(
+            "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+            (101, owner_a_job, "account-a", '{"status":"OK"}', 3),
+        )
+        self.inner.exec(
+            "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+            (202, owner_b_job, "account-b", '{"status":"FAIL"}', 3),
         )
         handler = object.__new__(MasterHandler)
         handler.server = self.server
@@ -144,6 +152,7 @@ class JobCreationRaceTest(unittest.TestCase):
             "running_jobs": 1,
             "done_jobs": 1,
             "total_accounts": 350,
+            "processed_accounts": 2,
         })
 
 
