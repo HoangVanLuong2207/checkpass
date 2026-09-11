@@ -1456,34 +1456,54 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         # Cố định 15 account/chunk; không nhận cấu hình từ client.
         chunk_size = DEFAULT_CHUNK_LIMIT
+        chunks = split_chunks(parsed, chunk_size)
+        chunk_payloads = [
+            json.dumps(
+                [acc.raw_line or f"{acc.account}|{acc.password}" for acc in chunk],
+                ensure_ascii=False,
+            )
+            for chunk in chunks
+        ]
 
         store = self.server.store
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
         owner_preview = (auth or {}).get("owner_preview", "") if auth else ""
+        job_id = 0
         try:
+            # Giữ job ở trạng thái trung gian cho tới khi toàn bộ chunk đã lưu.
+            # Vệ tinh và _check_finish_all_jobs chỉ xử lý job "open".
             job_id = store.exec(
                 "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
-                (_now(), len(parsed), chunk_size, "open", owner_hash, owner_preview),
+                (_now(), len(parsed), chunk_size, "creating", owner_hash, owner_preview),
             )
             if not job_id:
                 row = store.fetchone("SELECT MAX(id) FROM jobs")
                 if row and row[0]:
                     job_id = int(row[0])
-            chunks = split_chunks(parsed, chunk_size)
+            if not job_id:
+                raise RuntimeError("không lấy được job_id sau khi tạo")
             stmts = []
-            for idx, chunk in enumerate(chunks):
-                accounts_json = json.dumps(
-                    [acc.raw_line or f"{acc.account}|{acc.password}" for acc in chunk],
-                    ensure_ascii=False,
-                )
+            for idx, accounts_json in enumerate(chunk_payloads):
                 stmts.append({
                     "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
                     "args": [job_id, idx, accounts_json],
                 })
-            if stmts:
-                store.batch(stmts)
+            # UPDATE cuối cùng nằm trong cùng batch/transaction với chunks.
+            stmts.append({
+                "sql": "UPDATE jobs SET status='open' WHERE id=? AND status='creating'",
+                "args": [job_id],
+            })
+            store.batch(stmts)
         except Exception as exc:
             print(f"[master] Loi luu job vao DB: {exc}", flush=True)
+            if job_id:
+                try:
+                    store.batch([
+                        {"sql": "DELETE FROM chunks WHERE job_id=?", "args": [job_id]},
+                        {"sql": "DELETE FROM jobs WHERE id=? AND status='creating'", "args": [job_id]},
+                    ])
+                except Exception as cleanup_exc:
+                    print(f"[master] Loi don job dang tao {job_id}: {cleanup_exc}", flush=True)
             self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Lỗi lưu job vào DB: {exc}"[:300]})
             return
         self._json(HTTPStatus.OK, {
@@ -1836,12 +1856,16 @@ class MasterHandler(BaseHTTPRequestHandler):
         open_jobs = store.fetch("SELECT id FROM jobs WHERE status='open'")
         for item in open_jobs:
             job_id = item[0]
-            pending = store.fetchone(
-                "SELECT COUNT(*) FROM chunks WHERE job_id=? AND status!='done'", (job_id,)
+            chunk_counts = store.fetchone(
+                "SELECT COUNT(*), SUM(CASE WHEN status!='done' THEN 1 ELSE 0 END) FROM chunks WHERE job_id=?",
+                (job_id,),
             )
-            if pending and pending[0] == 0:
+            total_chunks = int(chunk_counts[0] or 0) if chunk_counts else 0
+            unfinished_chunks = int(chunk_counts[1] or 0) if chunk_counts else 0
+            # Job không có chunk là job chưa tạo xong/lỗi; tuyệt đối không tự đánh done.
+            if total_chunks > 0 and unfinished_chunks == 0:
                 store.exec(
-                    "UPDATE jobs SET status='done', finished_at=? WHERE id=?",
+                    "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='open'",
                     (now, job_id),
                 )
 
