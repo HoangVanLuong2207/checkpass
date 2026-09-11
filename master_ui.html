@@ -50,6 +50,8 @@
   --radius-sm: 8px;
   --radius: 14px;
   --radius-lg: 20px;
+  --detail-motion-duration: 300ms;
+  --detail-motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 * {
@@ -480,10 +482,10 @@ body {
   max-width: 100%;
 }
 .workspace.detail-open .jobs-card {
-  animation: jobsColumnSettle 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: jobsColumnSettle var(--detail-motion-duration) var(--detail-motion-easing) both;
 }
 .jobs-card.list-expand {
-  animation: jobsColumnExpand 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: jobsColumnExpand var(--detail-motion-duration) var(--detail-motion-easing) both;
 }
 
 /* Cards */
@@ -711,19 +713,19 @@ body {
   will-change: transform, opacity;
 }
 .detail-card.detail-enter {
-  animation: detailCardEnter 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: detailCardEnter var(--detail-motion-duration) var(--detail-motion-easing) both;
 }
 .detail-card.detail-leave {
-  animation: detailCardLeave 0.24s cubic-bezier(0.4, 0, 1, 1) both;
+  animation: detailCardLeave var(--detail-motion-duration) var(--detail-motion-easing) both;
   pointer-events: none;
 }
 @keyframes detailCardEnter {
-  from { opacity: 0; transform: translateX(28px) translateY(8px) scale(0.985); filter: blur(2px); }
-  to { opacity: 1; transform: translateX(0) translateY(0) scale(1); filter: blur(0); }
+  from { opacity: 0; transform: translateX(24px) scale(0.985); filter: blur(2px); }
+  to { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
 }
 @keyframes detailCardLeave {
-  from { opacity: 1; transform: translateX(0) scale(1); }
-  to { opacity: 0; transform: translateX(24px) scale(0.985); }
+  from { opacity: 1; transform: translateX(0) scale(1); filter: blur(0); }
+  to { opacity: 0; transform: translateX(24px) scale(0.985); filter: blur(2px); }
 }
 @keyframes jobsColumnSettle {
   from { opacity: 0.88; transform: translateX(-8px); }
@@ -1589,8 +1591,9 @@ let currentJobId = null;
 let detailPage = 1;
 let detailTimer = null;
 let detailRequestSeq = 0;
-let detailCloseTimer = null;
-let detailAnimationSeq = 0;
+let detailTransitionTimer = null;
+let pendingJobId = null;
+const DETAIL_TRANSITION_MS = 300;
 let jobsCache = [];
 let jobsLoading = false;
 let currentRawRows = [];
@@ -2028,18 +2031,27 @@ async function loadJobs() {
   }
 }
 
-async function viewJob(id) {
-  const animationSeq = ++detailAnimationSeq;
+function detailMotionDelay() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : DETAIL_TRANSITION_MS;
+}
+
+function restartDetailAnimation(detailCard, className) {
+  detailCard.classList.remove('detail-enter', 'detail-leave');
+  void detailCard.offsetWidth;
+  detailCard.classList.add(className);
+}
+
+function showJobDetail(id) {
   currentJobId = Number(id);
+  pendingJobId = null;
   detailPage = 1;
-  if (detailCloseTimer) { clearTimeout(detailCloseTimer); detailCloseTimer = null; }
   const workspace = document.getElementById('jobsWorkspace');
+  const jobsCard = workspace.querySelector('.jobs-card');
+  if (jobsCard) jobsCard.classList.remove('list-expand');
   workspace.classList.add('detail-open');
   const dc = document.getElementById('detailCard');
-  dc.classList.remove('detail-enter', 'detail-leave');
   dc.style.display = 'block';
-  void dc.offsetWidth;
-  if (animationSeq === detailAnimationSeq) dc.classList.add('detail-enter');
+  restartDetailAnimation(dc, 'detail-enter');
   document.getElementById('detailJobId').textContent = id;
   document.getElementById('detailRows').innerHTML = '<div class="empty-state"><i class="fa-solid fa-circle-notch fa-spin-fast"></i><br>Đang tải dữ liệu kết quả...</div>';
   renderJobs();
@@ -2049,33 +2061,73 @@ async function viewJob(id) {
   refreshDetail();
 }
 
+function finishDetailExit() {
+  detailTransitionTimer = null;
+  const workspace = document.getElementById('jobsWorkspace');
+  const dc = document.getElementById('detailCard');
+  dc.classList.remove('detail-leave');
+  if (pendingJobId !== null) {
+    const nextJobId = pendingJobId;
+    showJobDetail(nextJobId);
+    return;
+  }
+  workspace.classList.remove('detail-open');
+  dc.style.display = 'none';
+  const jobsCard = workspace.querySelector('.jobs-card');
+  if (jobsCard) {
+    jobsCard.classList.remove('list-expand');
+    void jobsCard.offsetWidth;
+    jobsCard.classList.add('list-expand');
+    setTimeout(() => jobsCard.classList.remove('list-expand'), detailMotionDelay());
+  }
+}
+
+function startDetailExit() {
+  detailRequestSeq++;
+  if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
+  const dc = document.getElementById('detailCard');
+  restartDetailAnimation(dc, 'detail-leave');
+  if (detailTransitionTimer) clearTimeout(detailTransitionTimer);
+  detailTransitionTimer = setTimeout(finishDetailExit, detailMotionDelay());
+}
+
+function viewJob(id) {
+  const nextJobId = Number(id);
+  const workspace = document.getElementById('jobsWorkspace');
+  const dc = document.getElementById('detailCard');
+  const isVisible = workspace.classList.contains('detail-open') && dc.style.display !== 'none';
+
+  if (isVisible && dc.classList.contains('detail-leave')) {
+    pendingJobId = nextJobId;
+    return;
+  }
+  if (isVisible && currentJobId !== null && currentJobId !== nextJobId) {
+    pendingJobId = nextJobId;
+    startDetailExit();
+    return;
+  }
+  if (currentJobId === nextJobId && isVisible) {
+    refreshDetail();
+    return;
+  }
+  if (detailTransitionTimer) { clearTimeout(detailTransitionTimer); detailTransitionTimer = null; }
+  showJobDetail(nextJobId);
+}
+
 function closeDetail() {
-  const animationSeq = ++detailAnimationSeq;
+  pendingJobId = null;
   currentJobId = null;
   detailRequestSeq++;
   detailPage = 1;
   if (detailTimer) { clearTimeout(detailTimer); detailTimer = null; }
-  if (detailCloseTimer) clearTimeout(detailCloseTimer);
   const workspace = document.getElementById('jobsWorkspace');
   const dc = document.getElementById('detailCard');
-  dc.classList.remove('detail-enter');
-  dc.classList.add('detail-leave');
   renderJobs();
-  const closeDelay = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 250;
-  detailCloseTimer = setTimeout(() => {
-    if (animationSeq !== detailAnimationSeq) return;
-    workspace.classList.remove('detail-open');
-    dc.style.display = 'none';
-    dc.classList.remove('detail-leave');
-    const jobsCard = workspace.querySelector('.jobs-card');
-    if (jobsCard) {
-      jobsCard.classList.remove('list-expand');
-      void jobsCard.offsetWidth;
-      jobsCard.classList.add('list-expand');
-      setTimeout(() => jobsCard.classList.remove('list-expand'), 360);
-    }
-    detailCloseTimer = null;
-  }, closeDelay);
+  if (!workspace.classList.contains('detail-open') || dc.style.display === 'none') {
+    finishDetailExit();
+    return;
+  }
+  if (!dc.classList.contains('detail-leave')) startDetailExit();
 }
 
 function scheduleDetail(id) {
