@@ -117,6 +117,35 @@ class JobCreationRaceTest(unittest.TestCase):
             "open",
         )
 
+    def test_regular_key_gets_global_overview_but_only_its_job_list(self) -> None:
+        self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+            (1, 100, 15, "open", "owner-a", "key-a"),
+        )
+        self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+            (2, 250, 15, "done", "owner-b", "key-b"),
+        )
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        captured: dict = {}
+
+        def capture_json(status: int, payload: dict) -> None:
+            captured["status"] = status
+            captured["payload"] = payload
+
+        handler._json = capture_json
+        handler._handle_jobs_list({"owner_hash": "owner-a", "is_admin": False})
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual([job["owner_preview"] for job in captured["payload"]["jobs"]], ["key-a"])
+        self.assertEqual(captured["payload"]["overview"], {
+            "total_jobs": 2,
+            "running_jobs": 1,
+            "done_jobs": 1,
+            "total_accounts": 350,
+        })
+
 
 if __name__ == "__main__":
     unittest.main()

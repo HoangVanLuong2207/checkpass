@@ -1393,6 +1393,20 @@ class MasterHandler(BaseHTTPRequestHandler):
         store = self.server.store
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
         is_admin = bool((auth or {}).get("is_admin"))
+        # Phần tổng quan luôn phản ánh toàn hệ thống để mọi key đều biết tải hiện tại.
+        # Danh sách/chi tiết job bên dưới vẫn giới hạn theo owner để không lộ dữ liệu.
+        overview_row = store.fetchone(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN status!='done' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END), "
+            "SUM(total) FROM jobs"
+        )
+        overview = {
+            "total_jobs": int((overview_row[0] if overview_row else 0) or 0),
+            "running_jobs": int((overview_row[1] if overview_row else 0) or 0),
+            "done_jobs": int((overview_row[2] if overview_row else 0) or 0),
+            "total_accounts": int((overview_row[3] if overview_row else 0) or 0),
+        }
         # Nếu admin (MASTER_TOKEN) hoặc owner rỗng (legacy/dev) thì xem tất cả
         if is_admin or not owner_hash:
             jobs_raw = store.fetch(
@@ -1430,7 +1444,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "uncheckable": uncheckable_count,
                 "owner_preview": row[6] if len(row) > 6 else "",
             })
-        self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs})
+        self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs, "overview": overview})
 
     def _handle_create_job(self, auth: dict[str, Any] | None = None) -> None:
         try:

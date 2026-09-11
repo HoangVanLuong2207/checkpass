@@ -1342,28 +1342,28 @@ table.data-table tbody tr:hover {
         <div class="overview-icon jobs"><i class="fa-solid fa-layer-group"></i></div>
         <div class="overview-info">
           <div class="overview-num" id="topTotalJobs">0</div>
-          <div class="overview-label">Tổng số Jobs</div>
+          <div class="overview-label">Tổng số Jobs · toàn hệ thống</div>
         </div>
       </div>
       <div class="overview-card">
         <div class="overview-icon running"><i class="fa-solid fa-bolt-lightning"></i></div>
         <div class="overview-info">
           <div class="overview-num" id="topRunningJobs">0</div>
-          <div class="overview-label">Jobs đang chạy</div>
+          <div class="overview-label">Jobs đang chạy · toàn hệ thống</div>
         </div>
       </div>
       <div class="overview-card">
         <div class="overview-icon done"><i class="fa-solid fa-circle-check"></i></div>
         <div class="overview-info">
           <div class="overview-num" id="topDoneJobs">0</div>
-          <div class="overview-label">Jobs hoàn thành</div>
+          <div class="overview-label">Jobs hoàn thành · toàn hệ thống</div>
         </div>
       </div>
       <div class="overview-card">
         <div class="overview-icon accounts"><i class="fa-solid fa-users"></i></div>
         <div class="overview-info">
           <div class="overview-num" id="topTotalAccs">0</div>
-          <div class="overview-label">Tổng tài khoản</div>
+          <div class="overview-label">Tổng tài khoản · toàn hệ thống</div>
         </div>
       </div>
     </div>
@@ -1874,16 +1874,19 @@ function copyToClipboard(text, btnElement) {
   });
 }
 
-function updateOverviewStats(jobs) {
-  let totalJobs = jobs.length;
-  let running = 0;
-  let done = 0;
-  let totalAccs = 0;
-  jobs.forEach(j => {
-    if (j.status === 'done') done++;
-    else running++;
-    totalAccs += Number(j.total || 0);
-  });
+function updateOverviewStats(jobs, overview) {
+  const hasSystemOverview = overview && typeof overview === 'object';
+  let totalJobs = hasSystemOverview ? Number(overview.total_jobs || 0) : jobs.length;
+  let running = hasSystemOverview ? Number(overview.running_jobs || 0) : 0;
+  let done = hasSystemOverview ? Number(overview.done_jobs || 0) : 0;
+  let totalAccs = hasSystemOverview ? Number(overview.total_accounts || 0) : 0;
+  if (!hasSystemOverview) {
+    jobs.forEach(j => {
+      if (j.status === 'done') done++;
+      else running++;
+      totalAccs += Number(j.total || 0);
+    });
+  }
   document.getElementById('topTotalJobs').textContent = formatNumber(totalJobs);
   document.getElementById('topRunningJobs').textContent = formatNumber(running);
   document.getElementById('topDoneJobs').textContent = formatNumber(done);
@@ -1959,7 +1962,7 @@ async function loadJobs() {
     const d = await api('/api/jobs_list');
     if (!d.ok) throw new Error(d.error || 'Không tải được danh sách jobs');
     jobsCache = Array.isArray(d.jobs) ? d.jobs : [];
-    updateOverviewStats(jobsCache);
+    updateOverviewStats(jobsCache, d.overview);
     const q = (document.getElementById('jobsSearchInput')?.value || '').trim().toLowerCase();
     renderJobs(q);
   } catch(e) {
