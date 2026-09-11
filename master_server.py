@@ -40,7 +40,6 @@ DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
-MAX_SATELLITE_TARGETS = 50
 SATELLITE_HEALTH_TIMEOUT = 20
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
@@ -781,7 +780,8 @@ def parse_satellite_targets(text: str) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     seen_urls: set[str] = set()
     for number, line in enumerate(text.splitlines(), 1):
-        match = re.search(r"https?://[^\s]+", line, flags=re.IGNORECASE)
+        # Dừng trước ký tự đóng Markdown để hỗ trợ cả [URL](URL).
+        match = re.search(r"https?://[^\s\]\)>]+", line, flags=re.IGNORECASE)
         if not match:
             continue
         url = match.group(0).rstrip("/.,;)")
@@ -802,8 +802,6 @@ def parse_satellite_targets(text: str) -> list[dict[str, str]]:
         named = re.search(r"\[([^]]+)\]", line)
         label = (named.group(1).strip() if named else "") or parsed.hostname or f"satellite-{number:02}"
         result.append({"label": label[:80], "url": url[:2048]})
-        if len(result) >= MAX_SATELLITE_TARGETS:
-            break
     return result
 
 
@@ -1268,9 +1266,6 @@ class MasterHandler(BaseHTTPRequestHandler):
             })
         if targets_value is not None:
             targets_text = str(targets_value).strip()
-            if len(targets_text) > 20000:
-                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "danh sách vệ tinh quá dài"})
-                return
             targets = parse_satellite_targets(targets_text)
             if targets_text and not targets:
                 self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không tìm thấy URL http/https hợp lệ"})
@@ -1290,9 +1285,6 @@ class MasterHandler(BaseHTTPRequestHandler):
         targets_text = str(body.get("satellite_targets") or "").strip()
         if not targets_text:
             targets_text = _setting(self.server.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
-        if len(targets_text) > 20000:
-            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "danh sách vệ tinh quá dài"})
-            return
         targets = parse_satellite_targets(targets_text)
         indexed_results: dict[int, dict[str, Any]] = {}
         if targets:
@@ -2270,6 +2262,10 @@ def main() -> int:
         assert [(target["label"], target["url"]) for target in targets] == [
             ("one", "https://one.example"), ("two.example", "https://two.example")
         ]
+        markdown_target = parse_satellite_targets(
+            "[Checkpass 1] ([https://checkpass3-wt3z.onrender.com/](https://checkpass3-wt3z.onrender.com/))"
+        )
+        assert markdown_target == [{"label": "Checkpass 1", "url": "https://checkpass3-wt3z.onrender.com"}]
         print("SELF-TEST OK: master parse/split."); return 0
 
     # Chọn store: PostgreSQL VPS, Turso cloud, hoặc SQLite local.
