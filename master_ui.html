@@ -432,9 +432,11 @@ body {
 /* Top Overview Stats Grid (2x2 Layout) */
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 0;
+  width: 100%;
   height: 100%;
 }
 .overview-card {
@@ -448,6 +450,9 @@ body {
   transition: all 0.25s ease;
   position: relative;
   box-shadow: var(--shadow-sm);
+  min-width: 0;
+  width: 100%;
+  height: 100%;
 }
 .overview-card:hover {
   transform: translateY(-2px);
@@ -471,6 +476,7 @@ body {
 
 .overview-info {
   flex: 1;
+  min-width: 0;
 }
 .overview-num {
   font-family: 'Outfit', sans-serif;
@@ -1299,6 +1305,7 @@ table.data-table tbody tr:hover {
   }
   .overview-grid {
     grid-template-columns: 1fr;
+    grid-template-rows: repeat(4, minmax(0, 1fr));
   }
   .detail-stats-grid {
     grid-template-columns: repeat(2, 1fr);
