@@ -377,8 +377,9 @@ body {
 /* Banner / Notice */
 .notice-box {
   margin: 0;
-  width: 100%;
-  height: auto;
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
   background: #FFFBEB;
   border: 1px solid #FDE68A;
   border-radius: var(--radius);
@@ -388,7 +389,7 @@ body {
   align-items: flex-start;
   position: relative;
   box-shadow: var(--shadow-sm);
-  box-sizing: border-box;
+  box-sizing: border-box !important;
 }
 .notice-icon {
   font-size: 22px;
@@ -397,9 +398,10 @@ body {
   flex-shrink: 0;
 }
 .notice-content {
-  flex: 1;
-  min-width: 0;
-  width: 100%;
+  flex: 1 1 0% !important;
+  min-width: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
   height: auto;
   font-size: 13.5px;
   line-height: 1.6;
@@ -407,13 +409,23 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  box-sizing: border-box !important;
 }
-.notice-content > div,
+/* Áp dụng triệt để nguyên tắc FILL cho mọi phần tử con, cháu của notice */
+.notice-content > *,
+.notice-content div,
+.notice-content p,
+.notice-content section,
+.notice-content article,
+.notice-content table,
 .notice-title,
 .notice-body,
 .notice-badges {
-  width: 100%;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
   height: auto;
+  box-sizing: border-box !important;
 }
 .notice-content strong {
   color: #92400E;
@@ -444,6 +456,23 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  width: auto !important; /* Tag badge tự ôm theo chữ */
+}
+
+/* Khử lớp bọc thừa nếu bị lồng notice-box bên trong */
+.notice-content .notice-box,
+#noticeContent .notice-box {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  box-shadow: none !important;
+  width: 100% !important;
+  max-width: 100% !important;
+}
+.notice-content .notice-icon,
+#noticeContent .notice-icon {
+  display: none !important;
 }
 
 /* Top Overview Stats Grid (4 Cards Row) */
@@ -1404,6 +1433,34 @@ table.data-table tbody tr:hover {
 }
 </style>
 <style id="noticeCustomStyle"></style>
+<style id="noticeEnforceStyle">
+#noticeBox {
+  width: 100% !important;
+  max-width: 100% !important;
+  height: auto !important;
+  box-sizing: border-box !important;
+}
+#noticeContent {
+  flex: 1 1 0% !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+}
+#noticeContent > *,
+#noticeContent div,
+#noticeContent p,
+#noticeContent table,
+#noticeContent section,
+#noticeContent article {
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+#noticeContent .notice-tag {
+  width: auto !important;
+}
+</style>
 </head>
 <body>
 
@@ -1822,8 +1879,23 @@ async function loadPublicNotice() {
     if (row) row.classList.toggle('notice-hidden', notice.enabled === false);
     const content = document.getElementById('noticeContent');
     if (content) {
-      if (typeof notice.html === 'string' && notice.html.trim()) content.innerHTML = notice.html;
-      else {
+      if (typeof notice.html === 'string' && notice.html.trim()) {
+        let cleanHtml = notice.html.trim();
+        // Bóc lớp bọc thừa nếu admin paste cả thẻ .notice-box vào ô HTML thông báo
+        const temp = document.createElement('div');
+        temp.innerHTML = cleanHtml;
+        const nestedBox = temp.querySelector('.notice-box, #noticeBox');
+        if (nestedBox && temp.children.length === 1 && temp.firstElementChild === nestedBox) {
+          const nestedContent = nestedBox.querySelector('.notice-content, #noticeContent');
+          cleanHtml = nestedContent ? nestedContent.innerHTML : nestedBox.innerHTML;
+        }
+        content.innerHTML = cleanHtml;
+        // Bỏ inline style cố định chiều rộng làm co rúm bố cục
+        content.querySelectorAll('*').forEach(el => {
+          if (el.style.maxWidth && el.style.maxWidth !== '100%') el.style.maxWidth = '100%';
+          if (el.style.width && el.style.width !== '100%' && !el.classList.contains('notice-tag')) el.style.width = '100%';
+        });
+      } else {
         const title = document.getElementById('noticeTitle');
         const body = document.getElementById('noticeBody');
         if (title) title.textContent = notice.title || '';
