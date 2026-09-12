@@ -366,7 +366,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
   gap: 18px;
-  align-items: stretch;
+  align-items: start;
   margin: 20px 0 22px;
 }
 .top-section-row.notice-hidden {
@@ -376,7 +376,8 @@ body {
 /* Banner / Notice */
 .notice-box {
   margin: 0;
-  height: 100%;
+  width: 100%;
+  height: auto;
   background: #FFFBEB;
   border: 1px solid #FDE68A;
   border-radius: var(--radius);
@@ -395,12 +396,22 @@ body {
 }
 .notice-content {
   flex: 1;
+  min-width: 0;
+  width: 100%;
+  height: auto;
   font-size: 13px;
   line-height: 1.6;
   color: #78350F;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+}
+.notice-content > div,
+.notice-title,
+.notice-body,
+.notice-badges {
+  width: 100%;
+  height: auto;
 }
 .notice-content strong {
   color: #92400E;
@@ -433,11 +444,11 @@ body {
 .overview-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 12px;
   margin: 0;
   width: 100%;
-  height: 100%;
+  height: auto;
+  align-items: start;
 }
 .overview-card {
   background: var(--bg-card);
@@ -452,7 +463,7 @@ body {
   box-shadow: var(--shadow-sm);
   min-width: 0;
   width: 100%;
-  height: 100%;
+  height: auto;
 }
 .overview-card:hover {
   transform: translateY(-2px);
@@ -477,6 +488,12 @@ body {
 .overview-info {
   flex: 1;
   min-width: 0;
+  width: 100%;
+  height: auto;
+}
+.overview-info > div {
+  width: 100%;
+  height: auto;
 }
 .overview-num {
   font-family: 'Outfit', sans-serif;
@@ -1305,7 +1322,6 @@ table.data-table tbody tr:hover {
   }
   .overview-grid {
     grid-template-columns: 1fr;
-    grid-template-rows: repeat(4, minmax(0, 1fr));
   }
   .detail-stats-grid {
     grid-template-columns: repeat(2, 1fr);
