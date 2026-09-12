@@ -363,12 +363,15 @@ body {
 
 /* Top Section: Notice + Overview Stats */
 .top-section-row {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 3fr);
   gap: 16px;
   width: 100%;
-  height: auto;
+  align-items: stretch;
   margin: 20px 0 24px;
+}
+.top-section-row.notice-hidden {
+  grid-template-columns: 1fr;
 }
 .top-section-row.notice-hidden #noticeBox {
   display: none !important;
@@ -379,7 +382,7 @@ body {
   margin: 0;
   width: 100% !important;
   max-width: 100% !important;
-  height: auto !important;
+  height: 100% !important;
   background: #FFFBEB;
   border: 1px solid #FDE68A;
   border-radius: var(--radius);
@@ -475,14 +478,15 @@ body {
   display: none !important;
 }
 
-/* Top Overview Stats Grid (4 Cards Row) */
+/* Top Overview Stats Grid (2x2 Layout cạnh Notice) */
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: repeat(2, 1fr);
+  gap: 12px;
   margin: 0;
   width: 100%;
-  height: auto;
+  height: 100%;
   align-items: stretch;
 }
 .overview-card {
@@ -1365,8 +1369,12 @@ table.data-table tbody tr:hover {
 }
 
 @media (max-width: 1024px) {
+  .top-section-row {
+    grid-template-columns: 1fr;
+  }
   .overview-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: auto;
   }
   .workspace.detail-open {
     grid-template-columns: 1fr;
@@ -1437,7 +1445,6 @@ table.data-table tbody tr:hover {
 #noticeBox {
   width: 100% !important;
   max-width: 100% !important;
-  height: auto !important;
   box-sizing: border-box !important;
 }
 #noticeContent {
