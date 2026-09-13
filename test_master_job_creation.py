@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -63,6 +64,15 @@ class JobCreationRaceTest(unittest.TestCase):
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
+
+    def post_error(self, path: str, body: dict) -> tuple[int, dict]:
+        try:
+            return self.post(path, body)
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+            finally:
+                exc.close()
 
     def test_claim_cannot_finish_job_before_chunks_are_saved(self) -> None:
         created: dict = {}
@@ -174,6 +184,49 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(returned["html"], notice_html)
         self.assertEqual(returned["css"], notice_css)
         self.assertTrue(returned["enabled"])
+
+    def test_admin_can_save_and_read_running_job_limit(self) -> None:
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        captured: list[tuple[int, dict]] = []
+        handler._read_json = lambda: {"max_running_jobs": 3}
+        handler._json = lambda status, payload: captured.append((status, payload))
+
+        handler._handle_admin_settings_save()
+        self.assertEqual(captured[-1][0], 200)
+        handler._handle_admin_settings_get()
+
+        settings = captured[-1][1]
+        self.assertEqual(settings["max_running_jobs"], 3)
+        self.assertEqual(settings["running_jobs"], 0)
+        self.assertEqual(settings["available_job_slots"], 3)
+
+    def test_rejects_new_job_at_limit_and_accepts_after_a_job_stops(self) -> None:
+        # This test exercises normal creation; the blocking wrapper is only needed
+        # by the separate race test above.
+        self.store.block_once = False
+        self.inner.exec(
+            "INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?)",
+            ("max_running_jobs", "1"),
+        )
+
+        status, first = self.post("/api/jobs", {"text": "user1|pass1"})
+        self.assertEqual(status, 200)
+
+        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"})
+        self.assertEqual(status, 429)
+        self.assertEqual(rejected["code"], "JOB_LIMIT_REACHED")
+        self.assertEqual(rejected["running_jobs"], 1)
+        self.assertEqual(rejected["max_running_jobs"], 1)
+        self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM jobs")[0], 1)
+
+        status, stopped = self.post(f"/api/jobs/{first['job_id']}/stop", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(stopped["status"], "done")
+
+        status, second = self.post("/api/jobs", {"text": "user2|pass2"})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(second["job_id"], first["job_id"])
 
 
 if __name__ == "__main__":

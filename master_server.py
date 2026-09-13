@@ -36,6 +36,8 @@ from zoneinfo import ZoneInfo
 DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
 MAX_CHUNK_LIMIT = 15
+DEFAULT_MAX_RUNNING_JOBS = 10
+MAX_CONFIGURED_RUNNING_JOBS = 10_000
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
@@ -764,6 +766,23 @@ def _setting(store: Any, key: str, default: str = "") -> str:
     return str(row[0]) if row and row[0] is not None else default
 
 
+def _max_running_jobs(store: Any) -> int:
+    """Read the admission limit, falling back safely if stored data is invalid."""
+    try:
+        value = int(_setting(store, "max_running_jobs", str(DEFAULT_MAX_RUNNING_JOBS)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RUNNING_JOBS
+    if not 1 <= value <= MAX_CONFIGURED_RUNNING_JOBS:
+        return DEFAULT_MAX_RUNNING_JOBS
+    return value
+
+
+def _running_job_count(store: Any) -> int:
+    # "creating" reserves a slot until all chunks are committed and the job opens.
+    row = store.fetchone("SELECT COUNT(*) FROM jobs WHERE status IN ('creating','open')")
+    return int(row[0] or 0) if row else 0
+
+
 def _notice_payload(store: Any) -> dict[str, Any]:
     """Return editable HTML/CSS, falling back to the old title/body settings."""
     title = _setting(store, "notice_title", DEFAULT_NOTICE_TITLE)
@@ -1248,11 +1267,16 @@ class MasterHandler(BaseHTTPRequestHandler):
     def _handle_admin_settings_get(self) -> None:
         store = self.server.store
         targets_text = _setting(store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+        max_running_jobs = _max_running_jobs(store)
+        running_jobs = _running_job_count(store)
         self._json(HTTPStatus.OK, {
             "ok": True,
             "notice": _notice_payload(store),
             "satellite_targets": targets_text,
             "satellite_count": len(parse_satellite_targets(targets_text)),
+            "max_running_jobs": max_running_jobs,
+            "running_jobs": running_jobs,
+            "available_job_slots": max(0, max_running_jobs - running_jobs),
         })
 
     def _handle_admin_settings_save(self) -> None:
@@ -1262,6 +1286,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         notice = body.get("notice")
         targets_value = body.get("satellite_targets")
+        max_running_value = body.get("max_running_jobs")
         values: dict[str, str] = {}
         if notice is not None:
             if not isinstance(notice, dict):
@@ -1304,6 +1329,23 @@ class MasterHandler(BaseHTTPRequestHandler):
                 return
             normalized = "\n".join(f"[{target['label']}] {target['url']}" for target in targets)
             values["satellite_targets"] = normalized + ("\n" if normalized else "")
+        if max_running_value is not None:
+            try:
+                if isinstance(max_running_value, bool):
+                    raise ValueError
+                if isinstance(max_running_value, float) and not max_running_value.is_integer():
+                    raise ValueError
+                max_running_jobs = int(max_running_value)
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "giới hạn job phải là số nguyên"})
+                return
+            if not 1 <= max_running_jobs <= MAX_CONFIGURED_RUNNING_JOBS:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "error": f"giới hạn job phải từ 1 đến {MAX_CONFIGURED_RUNNING_JOBS:,}",
+                })
+                return
+            values["max_running_jobs"] = str(max_running_jobs)
         if not values:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không có cấu hình để lưu"})
             return
@@ -1516,43 +1558,60 @@ class MasterHandler(BaseHTTPRequestHandler):
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
         owner_preview = (auth or {}).get("owner_preview", "") if auth else ""
         job_id = 0
-        try:
-            # Giữ job ở trạng thái trung gian cho tới khi toàn bộ chunk đã lưu.
-            # Vệ tinh và _check_finish_all_jobs chỉ xử lý job "open".
-            job_id = store.exec(
-                "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
-                (_now(), len(parsed), chunk_size, "creating", owner_hash, owner_preview),
-            )
-            if not job_id:
-                row = store.fetchone("SELECT MAX(id) FROM jobs")
-                if row and row[0]:
-                    job_id = int(row[0])
-            if not job_id:
-                raise RuntimeError("không lấy được job_id sau khi tạo")
-            stmts = []
-            for idx, accounts_json in enumerate(chunk_payloads):
-                stmts.append({
-                    "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
-                    "args": [job_id, idx, accounts_json],
+        # Serialize admission and creation so simultaneous requests cannot all pass
+        # the count check before any of them reserves a slot.
+        with self.server.job_creation_lock:
+            max_running_jobs = _max_running_jobs(store)
+            running_jobs = _running_job_count(store)
+            if running_jobs >= max_running_jobs:
+                self._json(HTTPStatus.TOO_MANY_REQUESTS, {
+                    "ok": False,
+                    "code": "JOB_LIMIT_REACHED",
+                    "error": (
+                        f"Hệ thống đang chạy tối đa {max_running_jobs} job. "
+                        "Vui lòng chờ một job hoàn tất hoặc dừng bớt job rồi thử lại."
+                    ),
+                    "running_jobs": running_jobs,
+                    "max_running_jobs": max_running_jobs,
                 })
-            # UPDATE cuối cùng nằm trong cùng batch/transaction với chunks.
-            stmts.append({
-                "sql": "UPDATE jobs SET status='open' WHERE id=? AND status='creating'",
-                "args": [job_id],
-            })
-            store.batch(stmts)
-        except Exception as exc:
-            print(f"[master] Loi luu job vao DB: {exc}", flush=True)
-            if job_id:
-                try:
-                    store.batch([
-                        {"sql": "DELETE FROM chunks WHERE job_id=?", "args": [job_id]},
-                        {"sql": "DELETE FROM jobs WHERE id=? AND status='creating'", "args": [job_id]},
-                    ])
-                except Exception as cleanup_exc:
-                    print(f"[master] Loi don job dang tao {job_id}: {cleanup_exc}", flush=True)
-            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Lỗi lưu job vào DB: {exc}"[:300]})
-            return
+                return
+            try:
+                # Giữ job ở trạng thái trung gian cho tới khi toàn bộ chunk đã lưu.
+                # Vệ tinh và _check_finish_all_jobs chỉ xử lý job "open".
+                job_id = store.exec(
+                    "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+                    (_now(), len(parsed), chunk_size, "creating", owner_hash, owner_preview),
+                )
+                if not job_id:
+                    row = store.fetchone("SELECT MAX(id) FROM jobs")
+                    if row and row[0]:
+                        job_id = int(row[0])
+                if not job_id:
+                    raise RuntimeError("không lấy được job_id sau khi tạo")
+                stmts = []
+                for idx, accounts_json in enumerate(chunk_payloads):
+                    stmts.append({
+                        "sql": "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+                        "args": [job_id, idx, accounts_json],
+                    })
+                # UPDATE cuối cùng nằm trong cùng batch/transaction với chunks.
+                stmts.append({
+                    "sql": "UPDATE jobs SET status='open' WHERE id=? AND status='creating'",
+                    "args": [job_id],
+                })
+                store.batch(stmts)
+            except Exception as exc:
+                print(f"[master] Loi luu job vao DB: {exc}", flush=True)
+                if job_id:
+                    try:
+                        store.batch([
+                            {"sql": "DELETE FROM chunks WHERE job_id=?", "args": [job_id]},
+                            {"sql": "DELETE FROM jobs WHERE id=? AND status='creating'", "args": [job_id]},
+                        ])
+                    except Exception as cleanup_exc:
+                        print(f"[master] Loi don job dang tao {job_id}: {cleanup_exc}", flush=True)
+                self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"Lỗi lưu job vào DB: {exc}"[:300]})
+                return
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,
@@ -2295,6 +2354,7 @@ class CoordinatorServer(ThreadingHTTPServer):
         self.store = store
         self.master_token = master_token
         self.claim_lock = threading.Lock()
+        self.job_creation_lock = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
