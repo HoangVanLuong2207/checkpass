@@ -8,7 +8,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from master_server import CoordinatorServer, LocalStore, MasterHandler
+from master_server import (
+    CoordinatorServer,
+    LocalStore,
+    MasterHandler,
+    _prune_completed_jobs_before_today,
+    _today_start_timestamp,
+)
 
 
 class _BlockingCreateStore:
@@ -331,6 +337,42 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
         self.assertEqual(rejected["active_job_id"], first["job_id"])
+
+    def test_retention_keeps_old_running_job_until_it_finishes(self) -> None:
+        cutoff = _today_start_timestamp()
+
+        def add_job(created_at: float, status: str, account: str, chunk_status: str) -> tuple[int, int]:
+            job_id = self.inner.exec(
+                "INSERT INTO jobs (created_at, total, chunk_size, status, finished_at) VALUES (?,?,?,?,?)",
+                (created_at, 1, 15, status, created_at if status == "done" else None),
+            )
+            chunk_id = self.inner.exec(
+                "INSERT INTO chunks (job_id, idx, account, status) VALUES (?,?,?,?)",
+                (job_id, 0, json.dumps([f"{account}|pass"]), chunk_status),
+            )
+            self.inner.exec(
+                "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+                (chunk_id, job_id, account, '{}', created_at),
+            )
+            return job_id, chunk_id
+
+        old_done, _ = add_job(cutoff - 7200, "done", "old-done", "done")
+        old_running, old_running_chunk = add_job(cutoff - 3600, "open", "old-running", "pending")
+        today_done, _ = add_job(cutoff + 60, "done", "today-done", "done")
+
+        deleted = _prune_completed_jobs_before_today(self.inner, cutoff)
+        self.assertEqual(deleted, {"jobs": 1, "chunks": 1, "results": 1})
+        self.assertIsNone(self.inner.fetchone("SELECT id FROM jobs WHERE id=?", (old_done,)))
+        self.assertEqual(self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (old_running,))[0], "open")
+        self.assertIsNotNone(self.inner.fetchone("SELECT id FROM jobs WHERE id=?", (today_done,)))
+
+        self.inner.exec("UPDATE chunks SET status='done' WHERE id=?", (old_running_chunk,))
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        handler._check_finish_all_jobs(cutoff + 120)
+
+        self.assertIsNone(self.inner.fetchone("SELECT id FROM jobs WHERE id=?", (old_running,)))
+        self.assertIsNotNone(self.inner.fetchone("SELECT id FROM jobs WHERE id=?", (today_done,)))
 
     def test_rejects_new_job_at_limit_and_accepts_after_a_job_stops(self) -> None:
         # This test exercises normal creation; the blocking wrapper is only needed
