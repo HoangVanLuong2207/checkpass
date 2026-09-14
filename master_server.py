@@ -1993,15 +1993,9 @@ class MasterHandler(BaseHTTPRequestHandler):
                     (now, job_id),
                 )
 
-    def _check_job_access(self, job_id: int, auth: dict[str, Any] | None) -> tuple[bool, tuple | None]:
-        """Kiểm tra job có thuộc owner không. Trả về (allowed, job_row). Admin được xem tất cả."""
-        store = self.server.store
-        job = store.fetchone(
-            "SELECT id, created_at, total, chunk_size, status, finished_at, owner_hash, owner_preview FROM jobs WHERE id=?",
-            (job_id,),
-        )
-        if job is None:
-            return False, None
+    @staticmethod
+    def _is_job_access_allowed(job: tuple, auth: dict[str, Any] | None) -> bool:
+        """Check access for a job row that has already been fetched."""
         # Nếu job cũ không có owner (legacy) thì chỉ admin mới xem được, user thường không thấy
         job_owner = job[6] or ""
         auth_owner = (auth or {}).get("owner_hash", "") if auth else ""
@@ -2011,36 +2005,58 @@ class MasterHandler(BaseHTTPRequestHandler):
             # Nếu dev mode (không license, không master_token) thì owner rỗng -> cho qua
             if not is_admin and job_owner == "" and auth_owner != "":
                 # User thường không được xem job legacy của người khác
-                return False, job
-            return True, job
+                return False
+            return True
         if job_owner == auth_owner:
-            return True, job
-        return False, job
+            return True
+        return False
+
+    def _check_job_access(self, job_id: int, auth: dict[str, Any] | None) -> tuple[bool, tuple | None]:
+        """Kiểm tra job có thuộc owner không. Trả về (allowed, job_row). Admin được xem tất cả."""
+        store = self.server.store
+        job = store.fetchone(
+            "SELECT id, created_at, total, chunk_size, status, finished_at, owner_hash, owner_preview FROM jobs WHERE id=?",
+            (job_id,),
+        )
+        if job is None:
+            return False, None
+        return self._is_job_access_allowed(job, auth), job
 
     def _handle_job_summary(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
         store = self.server.store
-        allowed, job = self._check_job_access(job_id, auth)
-        if job is None:
+        # Read the job, chunk progress and result totals in one DB round-trip.
+        # Remote stores no longer pay five sequential network latencies here.
+        summary = store.fetchone(
+            "WITH chunk_stats AS ("
+            "SELECT "
+            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
+            "SUM(CASE WHEN status='claimed' THEN 1 ELSE 0 END) AS claimed, "
+            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
+            "FROM chunks WHERE job_id=?"
+            "), result_stats AS ("
+            "SELECT COUNT(*) AS result_count, "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) AS ok_count, "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END) AS fail_count, "
+            "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) AS uncheckable_count "
+            "FROM results WHERE job_id=?"
+            ") "
+            "SELECT j.id, j.created_at, j.total, j.chunk_size, j.status, j.finished_at, "
+            "j.owner_hash, j.owner_preview, "
+            "COALESCE(c.pending,0), COALESCE(c.claimed,0), COALESCE(c.done,0), "
+            "COALESCE(r.result_count,0), COALESCE(r.ok_count,0), "
+            "COALESCE(r.fail_count,0), COALESCE(r.uncheckable_count,0) "
+            "FROM jobs j CROSS JOIN chunk_stats c CROSS JOIN result_stats r WHERE j.id=?",
+            (job_id, job_id, job_id),
+        )
+        if summary is None:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
             return
-        if not allowed:
+        job = summary[:8]
+        if not self._is_job_access_allowed(job, auth):
             self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền xem job này (key khác)"})
             return
-        pending = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='pending'", (job_id,)) or [0])[0]
-        claimed = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='claimed'", (job_id,)) or [0])[0]
-        done = (store.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status='done'", (job_id,)) or [0])[0]
-        results = store.fetchone(
-            "SELECT COUNT(*), "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) "
-            "FROM results WHERE job_id=?",
-            (job_id,),
-        )
-        results_count = (results[0] if results else 0) or 0
-        ok_count = (results[1] if results else 0) or 0
-        fail_count = (results[2] if results else 0) or 0
-        uncheckable_count = (results[3] if results else 0) or 0
+        pending, claimed, done = summary[8:11]
+        results_count, ok_count, fail_count, uncheckable_count = summary[11:15]
         self._json(HTTPStatus.OK, {
             "ok": True,
             "job_id": job_id,

@@ -208,6 +208,36 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertTrue(all(job["processed"] == 1 for job in captured["payload"]["jobs"]))
         self.assertEqual(counting_store.read_calls, 3)
 
+    def test_job_summary_uses_one_database_read(self) -> None:
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+            (1, 3, 15, "open", "owner-a", "key-a"),
+        )
+        chunk_ids = [
+            self.inner.exec(
+                "INSERT INTO chunks (job_id, idx, account, status) VALUES (?,?,?,?)",
+                (job_id, index, "[]", status),
+            )
+            for index, status in enumerate(("pending", "claimed", "done"))
+        ]
+        self.inner.exec(
+            "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+            (chunk_ids[-1], job_id, "account-ok", '{"status":"OK"}', 2),
+        )
+
+        counting_store = _CountingStore(self.inner)
+        handler = object.__new__(MasterHandler)
+        handler.server = type("Server", (), {"store": counting_store})()
+        captured: dict = {}
+        handler._json = lambda status, payload: captured.update(status=status, payload=payload)
+
+        handler._handle_job_summary(job_id, {"owner_hash": "owner-a", "is_admin": False})
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(captured["payload"]["chunks"], {"pending": 1, "claimed": 1, "done": 1})
+        self.assertEqual(captured["payload"]["results"]["count"], 1)
+        self.assertEqual(counting_store.read_calls, 1)
+
     def test_notice_html_and_css_can_be_saved(self) -> None:
         handler = object.__new__(MasterHandler)
         handler.server = self.server

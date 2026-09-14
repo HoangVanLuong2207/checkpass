@@ -1686,6 +1686,9 @@ let currentFilter = 'all';
 let currentSearch = '';
 let levelFilterTimer = null;
 const DETAIL_PAGE_SIZE = 100;
+const DETAIL_PROGRESS_REFRESH_MS = 1500;
+const DETAIL_ROWS_REFRESH_MS = 6000;
+let detailRowsLoadedAt = 0;
 
 function toast(msg, ms = 3200, type = 'info') {
   const t = document.getElementById('toast');
@@ -2134,6 +2137,7 @@ function showJobDetail(id) {
   currentJobId = Number(id);
   pendingJobId = null;
   detailPage = 1;
+  detailRowsLoadedAt = 0;
   const workspace = document.getElementById('jobsWorkspace');
   const jobsCard = workspace.querySelector('.jobs-card');
   if (jobsCard) jobsCard.classList.remove('list-expand');
@@ -2222,8 +2226,8 @@ function closeDetail() {
 function scheduleDetail(id) {
   if (detailTimer) clearTimeout(detailTimer);
   detailTimer = setTimeout(() => {
-    if (currentJobId === id) refreshDetail();
-  }, 4000);
+    if (currentJobId === id) refreshDetail(false);
+  }, DETAIL_PROGRESS_REFRESH_MS);
 }
 
 function getRowCategory(row, minLevel = 12) {
@@ -2369,7 +2373,7 @@ function renderFilteredRows() {
   container.innerHTML = h;
 }
 
-async function refreshDetail() {
+async function refreshDetail(forceRows = true) {
   if (!currentJobId) return;
   const id = currentJobId;
   const requestSeq = ++detailRequestSeq;
@@ -2381,12 +2385,14 @@ async function refreshDetail() {
     '&per_page=' + DETAIL_PAGE_SIZE +
     '&filter=' + encodeURIComponent(currentFilter) +
     '&min_level=' + minLevel;
+  const shouldLoadRows = forceRows || !detailRowsLoadedAt ||
+    (Date.now() - detailRowsLoadedAt >= DETAIL_ROWS_REFRESH_MS);
 
   try {
-    const [s, rd] = await Promise.all([
-      api('/api/jobs/' + id),
-      api(rowsUrl)
-    ]);
+    // Always let the lightweight progress request finish first.  The server's
+    // stores serialize reads, so starting the heavier rows request in parallel
+    // could otherwise acquire the DB lock first and delay the progress counters.
+    const s = await api('/api/jobs/' + id);
     if (id !== currentJobId || requestSeq !== detailRequestSeq) return;
     if (!s.ok) throw new Error(s.error || 'Không tải được chi tiết job');
 
@@ -2430,23 +2436,27 @@ async function refreshDetail() {
       '<div class="stat-box pending"><div class="num">' + formatNumber(r.uncheckable || 0) + '</div><div class="lbl">Chưa thể check</div></div>' +
       '<div class="stat-box"><div class="num">' + formatNumber(c.pending) + ' / ' + formatNumber(c.claimed) + '</div><div class="lbl">Chunks chờ / chạy</div></div>';
 
-    if (!rd.ok) throw new Error(rd.error || 'Không tải được kết quả');
-    currentRawRows = Array.isArray(rd.rows) ? rd.rows : [];
-    updateFilterTabCounts(rd.category_counts || {}, rd.total_all);
+    if (shouldLoadRows) {
+      const rd = await api(rowsUrl);
+      if (id !== currentJobId || requestSeq !== detailRequestSeq) return;
+      if (!rd.ok) throw new Error(rd.error || 'Không tải được kết quả');
+      currentRawRows = Array.isArray(rd.rows) ? rd.rows : [];
+      updateFilterTabCounts(rd.category_counts || {}, rd.total_all);
+      renderFilteredRows();
+      detailRowsLoadedAt = Date.now();
 
-    renderFilteredRows();
-
-    // Render Pagination nếu có
-    const totalPages = rd.total_pages || 1;
-    if (totalPages > 1) {
-      const pag = '<div class="pagination-wrap">' +
-        '<span class="page-info">Trang <strong>' + rd.page + '</strong> / ' + totalPages + ' (' + formatNumber(rd.total) + ' kết quả)</span>' +
-        '<div style="display:flex;gap:8px">' +
-          '<button class="btn btn-secondary btn-sm" ' + (rd.page <= 1 ? 'disabled' : '') + ' onclick="goDetailPage(' + (rd.page - 1) + ')"><i class="fa-solid fa-chevron-left"></i> Trước</button>' +
-          '<button class="btn btn-secondary btn-sm" ' + (rd.page >= totalPages ? 'disabled' : '') + ' onclick="goDetailPage(' + (rd.page + 1) + ')">Sau <i class="fa-solid fa-chevron-right"></i></button>' +
-        '</div>' +
-      '</div>';
-      document.getElementById('detailRows').insertAdjacentHTML('beforeend', pag);
+      // Render Pagination nếu có
+      const totalPages = rd.total_pages || 1;
+      if (totalPages > 1) {
+        const pag = '<div class="pagination-wrap">' +
+          '<span class="page-info">Trang <strong>' + rd.page + '</strong> / ' + totalPages + ' (' + formatNumber(rd.total) + ' kết quả)</span>' +
+          '<div style="display:flex;gap:8px">' +
+            '<button class="btn btn-secondary btn-sm" ' + (rd.page <= 1 ? 'disabled' : '') + ' onclick="goDetailPage(' + (rd.page - 1) + ')"><i class="fa-solid fa-chevron-left"></i> Trước</button>' +
+            '<button class="btn btn-secondary btn-sm" ' + (rd.page >= totalPages ? 'disabled' : '') + ' onclick="goDetailPage(' + (rd.page + 1) + ')">Sau <i class="fa-solid fa-chevron-right"></i></button>' +
+          '</div>' +
+        '</div>';
+        document.getElementById('detailRows').insertAdjacentHTML('beforeend', pag);
+      }
     }
 
     if (s.status === 'open') scheduleDetail(id);
