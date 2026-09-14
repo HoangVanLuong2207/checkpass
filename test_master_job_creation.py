@@ -37,6 +37,25 @@ class _BlockingCreateStore:
         self.inner.batch(statements)
 
 
+class _CountingStore:
+    """Record read calls while delegating storage to LocalStore."""
+
+    def __init__(self, inner: LocalStore) -> None:
+        self.inner = inner
+        self.read_calls = 0
+
+    def __getattr__(self, name: str):
+        return getattr(self.inner, name)
+
+    def fetch(self, sql: str, args: tuple = ()) -> list[tuple]:
+        self.read_calls += 1
+        return self.inner.fetch(sql, args)
+
+    def fetchone(self, sql: str, args: tuple = ()) -> tuple | None:
+        self.read_calls += 1
+        return self.inner.fetchone(sql, args)
+
+
 class JobCreationRaceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -164,6 +183,30 @@ class JobCreationRaceTest(unittest.TestCase):
             "total_accounts": 350,
             "processed_accounts": 2,
         })
+
+    def test_jobs_list_uses_constant_number_of_database_reads(self) -> None:
+        for index in range(12):
+            job_id = self.inner.exec(
+                "INSERT INTO jobs (created_at, total, chunk_size, status, owner_hash, owner_preview) VALUES (?,?,?,?,?,?)",
+                (index, 1, 15, "done", "owner-a", "key-a"),
+            )
+            self.inner.exec(
+                "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+                (1000 + index, job_id, f"account-{index}", '{"status":"OK"}', index),
+            )
+
+        counting_store = _CountingStore(self.inner)
+        handler = object.__new__(MasterHandler)
+        handler.server = type("Server", (), {"store": counting_store})()
+        captured: dict = {}
+        handler._json = lambda status, payload: captured.update(status=status, payload=payload)
+
+        handler._handle_jobs_list({"owner_hash": "owner-a", "is_admin": False})
+
+        self.assertEqual(captured["status"], 200)
+        self.assertEqual(len(captured["payload"]["jobs"]), 12)
+        self.assertTrue(all(job["processed"] == 1 for job in captured["payload"]["jobs"]))
+        self.assertEqual(counting_store.read_calls, 3)
 
     def test_notice_html_and_css_can_be_saved(self) -> None:
         handler = object.__new__(MasterHandler)

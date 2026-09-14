@@ -1469,18 +1469,23 @@ class MasterHandler(BaseHTTPRequestHandler):
         is_admin = bool((auth or {}).get("is_admin"))
         # Phần tổng quan luôn phản ánh toàn hệ thống để mọi key đều biết tải hiện tại.
         # Danh sách/chi tiết job bên dưới vẫn giới hạn theo owner để không lộ dữ liệu.
+        # Keep the overview authoritative, but fetch all five system-wide counters
+        # in one database round-trip.  This matters especially for Turso, where a
+        # fetch is a network request rather than an in-process SQLite read.
         overview_row = store.fetchone(
             "SELECT COUNT(*), "
-            "SUM(CASE WHEN status!='done' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN status IN ('creating','open') THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END), "
-            "SUM(total) FROM jobs"
+            "SUM(total), "
+            "(SELECT COUNT(*) FROM results) "
+            "FROM jobs"
         )
         overview = {
             "total_jobs": int((overview_row[0] if overview_row else 0) or 0),
             "running_jobs": int((overview_row[1] if overview_row else 0) or 0),
             "done_jobs": int((overview_row[2] if overview_row else 0) or 0),
             "total_accounts": int((overview_row[3] if overview_row else 0) or 0),
-            "processed_accounts": int((store.fetchone("SELECT COUNT(*) FROM results") or [0])[0] or 0),
+            "processed_accounts": int((overview_row[4] if overview_row else 0) or 0),
         }
         # Nếu admin (MASTER_TOKEN) hoặc owner rỗng (legacy/dev) thì xem tất cả
         if is_admin or not owner_hash:
@@ -1492,21 +1497,34 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "SELECT id, created_at, total, chunk_size, status, finished_at, owner_preview FROM jobs WHERE owner_hash=? ORDER BY id DESC LIMIT 50",
                 (owner_hash,),
             )
-        jobs = []
-        for row in jobs_raw:
-            job_id = row[0]
-            results = store.fetchone(
-                "SELECT COUNT(*), "
+        # Aggregate result counters for every visible job at once.  Previously
+        # this was one SELECT per job (up to 50 extra remote DB calls per poll).
+        result_counts_by_job: dict[int, tuple[int, int, int, int]] = {}
+        job_ids = [int(row[0]) for row in jobs_raw]
+        if job_ids:
+            placeholders = ",".join("?" for _ in job_ids)
+            result_rows = store.fetch(
+                "SELECT job_id, COUNT(*), "
                 "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END), "
                 "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END), "
                 "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) "
-                "FROM results WHERE job_id=?",
-                (job_id,),
+                f"FROM results WHERE job_id IN ({placeholders}) GROUP BY job_id",
+                tuple(job_ids),
             )
-            results_count = (results[0] if results else 0) or 0
-            ok_count = (results[1] if results else 0) or 0
-            fail_count = (results[2] if results else 0) or 0
-            uncheckable_count = (results[3] if results else 0) or 0
+            for result_row in result_rows:
+                result_counts_by_job[int(result_row[0])] = (
+                    int(result_row[1] or 0),
+                    int(result_row[2] or 0),
+                    int(result_row[3] or 0),
+                    int(result_row[4] or 0),
+                )
+
+        jobs = []
+        for row in jobs_raw:
+            job_id = row[0]
+            results_count, ok_count, fail_count, uncheckable_count = result_counts_by_job.get(
+                int(job_id), (0, 0, 0, 0)
+            )
             jobs.append({
                 "id": job_id,
                 "created_at": row[1],
