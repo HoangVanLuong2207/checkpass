@@ -327,16 +327,15 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotEqual(other_key_job["job_id"], first["job_id"])
 
-    def test_admin_key_can_only_have_one_running_job(self) -> None:
+    def test_admin_key_is_exempt_from_running_job_limit_per_key(self) -> None:
         self.store.block_once = False
 
         status, first = self.post("/api/jobs", {"text": "admin1|pass1"})
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "admin2|pass2"})
-        self.assertEqual(status, 409)
-        self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
-        self.assertEqual(rejected["active_job_id"], first["job_id"])
+        status, second = self.post("/api/jobs", {"text": "admin2|pass2"})
+        self.assertEqual(status, 200)
+        self.assertNotEqual(second["job_id"], first["job_id"])
 
     def test_retention_keeps_old_running_job_until_it_finishes(self) -> None:
         cutoff = _today_start_timestamp()

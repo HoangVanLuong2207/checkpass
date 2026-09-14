@@ -1692,16 +1692,11 @@ class MasterHandler(BaseHTTPRequestHandler):
         # the count check before any of them reserves a slot.
         with self.server.job_creation_lock:
             active_key_job = None
-            if owner_hash:
+            if owner_hash and not is_admin:
                 active_key_job = store.fetchone(
                     "SELECT id FROM jobs WHERE owner_hash=? AND status IN ('creating','open') ORDER BY id DESC LIMIT 1",
                     (owner_hash,),
                 )
-                # Các job admin được tạo trước bản cập nhật chưa lưu owner_hash.
-                if active_key_job is None and is_admin:
-                    active_key_job = store.fetchone(
-                        "SELECT id FROM jobs WHERE owner_hash='' AND owner_preview='admin' AND status IN ('creating','open') ORDER BY id DESC LIMIT 1"
-                    )
             if active_key_job is not None:
                 self._json(HTTPStatus.CONFLICT, {
                     "ok": False,

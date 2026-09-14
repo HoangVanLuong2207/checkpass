@@ -1903,7 +1903,7 @@ async function checkKey() {
       const accountLimitText = isAdminKey
         ? ' · <strong>Không giới hạn tài khoản/job</strong>'
         : (maxAccountsPerJob ? ' · Tối đa ' + formatNumber(maxAccountsPerJob) + ' tài khoản/job' : '');
-      st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (isAdminKey ? ' · <strong>Quyền Admin</strong>' : '') + accountLimitText + ' · 1 job đang chạy/key';
+      st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (isAdminKey ? ' · <strong>Quyền Admin</strong>' : '') + accountLimitText + (isAdminKey ? ' · Không áp dụng giới hạn 1 job/key' : ' · 1 job đang chạy/key');
       return true;
     }
     isAdminKey = false;
