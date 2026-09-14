@@ -1649,11 +1649,35 @@ class MasterHandler(BaseHTTPRequestHandler):
         ]
 
         owner_hash = (auth or {}).get("owner_hash", "") if auth else ""
+        auth_token = str((auth or {}).get("token") or "")
+        if not owner_hash and auth_token:
+            # Master Token cũng là một key và phải tuân theo giới hạn 1 job đang chạy/key.
+            owner_hash = _hash_key(auth_token)
         owner_preview = (auth or {}).get("owner_preview", "") if auth else ""
         job_id = 0
         # Serialize admission and creation so simultaneous requests cannot all pass
         # the count check before any of them reserves a slot.
         with self.server.job_creation_lock:
+            active_key_job = None
+            if owner_hash:
+                active_key_job = store.fetchone(
+                    "SELECT id FROM jobs WHERE owner_hash=? AND status IN ('creating','open') ORDER BY id DESC LIMIT 1",
+                    (owner_hash,),
+                )
+                # Các job admin được tạo trước bản cập nhật chưa lưu owner_hash.
+                if active_key_job is None and is_admin:
+                    active_key_job = store.fetchone(
+                        "SELECT id FROM jobs WHERE owner_hash='' AND owner_preview='admin' AND status IN ('creating','open') ORDER BY id DESC LIMIT 1"
+                    )
+            if active_key_job is not None:
+                self._json(HTTPStatus.CONFLICT, {
+                    "ok": False,
+                    "code": "KEY_RUNNING_JOB_LIMIT_REACHED",
+                    "error": "Mỗi key chỉ được có 1 job đang chạy. Vui lòng chờ job hiện tại hoàn tất hoặc dừng job đó trước.",
+                    "active_job_id": int(active_key_job[0]),
+                    "max_running_jobs_per_key": 1,
+                })
+                return
             max_running_jobs = _max_running_jobs(store)
             running_jobs = _running_job_count(store)
             if running_jobs >= max_running_jobs:

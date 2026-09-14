@@ -306,6 +306,32 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(created["total"], 2)
 
+    def test_each_regular_key_can_only_have_one_running_job(self) -> None:
+        self.store.block_once = False
+
+        status, first = self.post("/api/jobs", {"text": "user1|pass1"}, token="key-a")
+        self.assertEqual(status, 200)
+
+        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"}, token="key-a")
+        self.assertEqual(status, 409)
+        self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
+        self.assertEqual(rejected["active_job_id"], first["job_id"])
+
+        status, other_key_job = self.post("/api/jobs", {"text": "user3|pass3"}, token="key-b")
+        self.assertEqual(status, 200)
+        self.assertNotEqual(other_key_job["job_id"], first["job_id"])
+
+    def test_admin_key_can_only_have_one_running_job(self) -> None:
+        self.store.block_once = False
+
+        status, first = self.post("/api/jobs", {"text": "admin1|pass1"})
+        self.assertEqual(status, 200)
+
+        status, rejected = self.post_error("/api/jobs", {"text": "admin2|pass2"})
+        self.assertEqual(status, 409)
+        self.assertEqual(rejected["code"], "KEY_RUNNING_JOB_LIMIT_REACHED")
+        self.assertEqual(rejected["active_job_id"], first["job_id"])
+
     def test_rejects_new_job_at_limit_and_accepts_after_a_job_stops(self) -> None:
         # This test exercises normal creation; the blocking wrapper is only needed
         # by the separate race test above.
@@ -315,10 +341,10 @@ class JobCreationRaceTest(unittest.TestCase):
             ("max_running_jobs", "1"),
         )
 
-        status, first = self.post("/api/jobs", {"text": "user1|pass1"})
+        status, first = self.post("/api/jobs", {"text": "user1|pass1"}, token="key-a")
         self.assertEqual(status, 200)
 
-        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"})
+        status, rejected = self.post_error("/api/jobs", {"text": "user2|pass2"}, token="key-b")
         self.assertEqual(status, 429)
         self.assertEqual(rejected["code"], "JOB_LIMIT_REACHED")
         self.assertEqual(rejected["running_jobs"], 1)
@@ -329,7 +355,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(stopped["status"], "done")
 
-        status, second = self.post("/api/jobs", {"text": "user2|pass2"})
+        status, second = self.post("/api/jobs", {"text": "user2|pass2"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(second["job_id"], first["job_id"])
 
