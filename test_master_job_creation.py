@@ -74,19 +74,19 @@ class JobCreationRaceTest(unittest.TestCase):
         self.inner._conn.close()
         self.temp_dir.cleanup()
 
-    def post(self, path: str, body: dict) -> tuple[int, dict]:
+    def post(self, path: str, body: dict, token: str = "secret") -> tuple[int, dict]:
         request = urllib.request.Request(
             self.base_url + path,
             data=json.dumps(body).encode("utf-8"),
             method="POST",
-            headers={"Authorization": "Bearer secret", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=10) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
-    def post_error(self, path: str, body: dict) -> tuple[int, dict]:
+    def post_error(self, path: str, body: dict, token: str = "secret") -> tuple[int, dict]:
         try:
-            return self.post(path, body)
+            return self.post(path, body, token)
         except urllib.error.HTTPError as exc:
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -273,6 +273,38 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(settings["max_running_jobs"], 3)
         self.assertEqual(settings["running_jobs"], 0)
         self.assertEqual(settings["available_job_slots"], 3)
+
+    def test_admin_can_save_and_read_account_limit_per_job(self) -> None:
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        captured: list[tuple[int, dict]] = []
+        handler._read_json = lambda: {"max_accounts_per_job": 2500}
+        handler._json = lambda status, payload: captured.append((status, payload))
+
+        handler._handle_admin_settings_save()
+        self.assertEqual(captured[-1][0], 200)
+        handler._handle_admin_settings_get()
+
+        self.assertEqual(captured[-1][1]["max_accounts_per_job"], 2500)
+
+    def test_account_limit_rejects_regular_key_but_not_admin_key(self) -> None:
+        self.store.block_once = False
+        self.inner.exec(
+            "INSERT INTO app_settings (setting_key, setting_value) VALUES (?,?)",
+            ("max_accounts_per_job", "1"),
+        )
+        text = "user1|pass1\nuser2|pass2"
+
+        status, rejected = self.post_error("/api/jobs", {"text": text}, token="regular-key")
+        self.assertEqual(status, 413)
+        self.assertEqual(rejected["code"], "ACCOUNT_LIMIT_REACHED")
+        self.assertEqual(rejected["submitted_accounts"], 2)
+        self.assertEqual(rejected["max_accounts_per_job"], 1)
+        self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM jobs")[0], 0)
+
+        status, created = self.post("/api/jobs", {"text": text}, token="secret")
+        self.assertEqual(status, 200)
+        self.assertEqual(created["total"], 2)
 
     def test_rejects_new_job_at_limit_and_accepts_after_a_job_stops(self) -> None:
         # This test exercises normal creation; the blocking wrapper is only needed

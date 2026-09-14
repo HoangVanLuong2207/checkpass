@@ -1681,6 +1681,8 @@ const DETAIL_TRANSITION_MS = 300;
 const JOBS_EXPAND_MS = 480;
 let jobsCache = [];
 let jobsLoading = false;
+let isAdminKey = false;
+let maxAccountsPerJob = null;
 let currentRawRows = [];
 let currentFilter = 'all';
 let currentSearch = '';
@@ -1748,9 +1750,20 @@ function toggleKeyVisibility() {
 
 function updateAccountCounter() {
   const text = (document.getElementById('accInput')?.value || '').trim();
-  const lines = text ? text.split('\n').filter(l => l.trim().length > 0) : [];
+  const lines = text ? text.split(/\r?\n/).filter(line => {
+    const value = line.trim();
+    return value.length > 0 && !value.startsWith('#');
+  }) : [];
   const el = document.getElementById('accCounter');
-  if (el) el.textContent = formatNumber(lines.length) + ' tài khoản';
+  if (el) {
+    const overLimit = !isAdminKey && Number.isInteger(maxAccountsPerJob) && lines.length > maxAccountsPerJob;
+    el.textContent = formatNumber(lines.length) + (
+      !isAdminKey && Number.isInteger(maxAccountsPerJob)
+        ? ' / ' + formatNumber(maxAccountsPerJob) + ' tài khoản'
+        : ' tài khoản'
+    );
+    el.style.color = overLimit ? 'var(--danger)' : '';
+  }
 }
 
 document.addEventListener('keydown', event => {
@@ -1880,18 +1893,31 @@ async function checkKey() {
     const r = await fetch('/api/verify?token=' + encodeURIComponent(TOKEN), { headers: getHeaders() });
     const j = await r.json();
     if (j.valid || j.ok) {
-      setClearAllButton(j.is_admin === true);
+      isAdminKey = j.is_admin === true;
+      const configuredLimit = Number(j.max_accounts_per_job);
+      maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
+      setClearAllButton(isAdminKey);
+      updateAccountCounter();
       st.style.background = '#ECFDF5';
       st.style.color = '#047857';
-      st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (j.is_admin ? ' · <strong>Quyền Admin</strong>' : '');
+      const accountLimitText = isAdminKey
+        ? ' · <strong>Không giới hạn tài khoản/job</strong>'
+        : (maxAccountsPerJob ? ' · Tối đa ' + formatNumber(maxAccountsPerJob) + ' tài khoản/job' : '');
+      st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (isAdminKey ? ' · <strong>Quyền Admin</strong>' : '') + accountLimitText;
       return true;
     }
+    isAdminKey = false;
+    maxAccountsPerJob = null;
+    updateAccountCounter();
     setClearAllButton(false);
     st.style.background = '#FEE2E2';
     st.style.color = '#B91C1C';
     st.innerHTML = '<i class="fa-solid fa-circle-xmark"></i> Key không hợp lệ: ' + (j.error || 'không rõ nguyên nhân');
     return false;
   } catch(e) {
+    isAdminKey = false;
+    maxAccountsPerJob = null;
+    updateAccountCounter();
     setClearAllButton(false);
     st.style.background = '#FEF3C7';
     st.style.color = '#B45309';
@@ -1932,6 +1958,14 @@ async function sendJob() {
   const text = document.getElementById('accInput').value.trim();
   if (!text) {
     toast('⚠️ Vui lòng nhập danh sách tài khoản!');
+    return;
+  }
+  const accountCount = text.split(/\r?\n/).filter(line => {
+    const value = line.trim();
+    return value.length > 0 && !value.startsWith('#');
+  }).length;
+  if (!isAdminKey && Number.isInteger(maxAccountsPerJob) && accountCount > maxAccountsPerJob) {
+    toast('❌ Mỗi job chỉ được gửi tối đa ' + formatNumber(maxAccountsPerJob) + ' tài khoản');
     return;
   }
   const btn = document.getElementById('btnSend');
