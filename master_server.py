@@ -91,11 +91,33 @@ CREATE TABLE IF NOT EXISTS app_settings (
     setting_key TEXT PRIMARY KEY,
     setting_value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS job_stats (
+    job_id INTEGER PRIMARY KEY,
+    total_accounts INTEGER NOT NULL DEFAULT 0,
+    job_status TEXT NOT NULL DEFAULT 'creating',
+    pending_chunks INTEGER NOT NULL DEFAULT 0,
+    claimed_chunks INTEGER NOT NULL DEFAULT 0,
+    done_chunks INTEGER NOT NULL DEFAULT 0,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    ok_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    uncheckable_count INTEGER NOT NULL DEFAULT 0,
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS job_result_stats (
+    job_id INTEGER NOT NULL,
+    category TEXT NOT NULL,
+    level INTEGER NOT NULL DEFAULT 0,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (job_id, category, level)
+);
 CREATE INDEX IF NOT EXISTS idx_chunks_claim ON chunks(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_chunk ON results(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
+CREATE INDEX IF NOT EXISTS idx_results_job_id ON results(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash);
+CREATE INDEX IF NOT EXISTS idx_job_stats_status ON job_stats(job_status);
 """
 
 _POSTGRES_SCHEMA = """
@@ -136,12 +158,413 @@ CREATE TABLE IF NOT EXISTS app_settings (
     setting_key TEXT PRIMARY KEY,
     setting_value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS job_stats (
+    job_id BIGINT PRIMARY KEY,
+    total_accounts INTEGER NOT NULL DEFAULT 0,
+    job_status TEXT NOT NULL DEFAULT 'creating',
+    pending_chunks INTEGER NOT NULL DEFAULT 0,
+    claimed_chunks INTEGER NOT NULL DEFAULT 0,
+    done_chunks INTEGER NOT NULL DEFAULT 0,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    ok_count INTEGER NOT NULL DEFAULT 0,
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    uncheckable_count INTEGER NOT NULL DEFAULT 0,
+    updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS job_result_stats (
+    job_id BIGINT NOT NULL,
+    category TEXT NOT NULL,
+    level INTEGER NOT NULL DEFAULT 0,
+    result_count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (job_id, category, level)
+);
 CREATE INDEX IF NOT EXISTS idx_chunks_claim ON chunks(status, lease_until);
 CREATE INDEX IF NOT EXISTS idx_chunks_job ON chunks(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_chunk ON results(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
+CREATE INDEX IF NOT EXISTS idx_results_job_id ON results(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash);
+CREATE INDEX IF NOT EXISTS idx_job_stats_status ON job_stats(job_status);
 """
+
+
+_SQLITE_JOB_STATS_TRIGGERS = (
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_jobs_insert
+    AFTER INSERT ON jobs BEGIN
+        INSERT INTO job_stats (job_id, total_accounts, job_status, updated_at)
+        VALUES (NEW.id, NEW.total, NEW.status, CAST(strftime('%s','now') AS REAL))
+        ON CONFLICT(job_id) DO UPDATE SET
+            total_accounts=excluded.total_accounts,
+            job_status=excluded.job_status,
+            updated_at=excluded.updated_at;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_jobs_update
+    AFTER UPDATE OF total, status ON jobs BEGIN
+        UPDATE job_stats SET
+            total_accounts=NEW.total,
+            job_status=NEW.status,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=NEW.id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_jobs_delete
+    AFTER DELETE ON jobs BEGIN
+        DELETE FROM job_stats WHERE job_id=OLD.id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_chunks_insert
+    AFTER INSERT ON chunks BEGIN
+        UPDATE job_stats SET
+            pending_chunks=pending_chunks + CASE WHEN NEW.status='pending' THEN 1 ELSE 0 END,
+            claimed_chunks=claimed_chunks + CASE WHEN NEW.status='claimed' THEN 1 ELSE 0 END,
+            done_chunks=done_chunks + CASE WHEN NEW.status='done' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=NEW.job_id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_chunks_update
+    AFTER UPDATE OF job_id, status ON chunks BEGIN
+        UPDATE job_stats SET
+            pending_chunks=pending_chunks - CASE WHEN OLD.status='pending' THEN 1 ELSE 0 END,
+            claimed_chunks=claimed_chunks - CASE WHEN OLD.status='claimed' THEN 1 ELSE 0 END,
+            done_chunks=done_chunks - CASE WHEN OLD.status='done' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=OLD.job_id;
+        UPDATE job_stats SET
+            pending_chunks=pending_chunks + CASE WHEN NEW.status='pending' THEN 1 ELSE 0 END,
+            claimed_chunks=claimed_chunks + CASE WHEN NEW.status='claimed' THEN 1 ELSE 0 END,
+            done_chunks=done_chunks + CASE WHEN NEW.status='done' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=NEW.job_id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_chunks_delete
+    AFTER DELETE ON chunks BEGIN
+        UPDATE job_stats SET
+            pending_chunks=pending_chunks - CASE WHEN OLD.status='pending' THEN 1 ELSE 0 END,
+            claimed_chunks=claimed_chunks - CASE WHEN OLD.status='claimed' THEN 1 ELSE 0 END,
+            done_chunks=done_chunks - CASE WHEN OLD.status='done' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=OLD.job_id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_results_insert
+    AFTER INSERT ON results BEGIN
+        UPDATE job_stats SET
+            result_count=result_count + 1,
+            ok_count=ok_count + CASE WHEN json_extract(NEW.row_json,'$.status')='OK' THEN 1 ELSE 0 END,
+            fail_count=fail_count + CASE WHEN json_extract(NEW.row_json,'$.status')='FAIL' THEN 1 ELSE 0 END,
+            uncheckable_count=uncheckable_count + CASE WHEN json_extract(NEW.row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=NEW.job_id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_results_update
+    AFTER UPDATE OF job_id, row_json ON results BEGIN
+        UPDATE job_stats SET
+            result_count=result_count - 1,
+            ok_count=ok_count - CASE WHEN json_extract(OLD.row_json,'$.status')='OK' THEN 1 ELSE 0 END,
+            fail_count=fail_count - CASE WHEN json_extract(OLD.row_json,'$.status')='FAIL' THEN 1 ELSE 0 END,
+            uncheckable_count=uncheckable_count - CASE WHEN json_extract(OLD.row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=OLD.job_id;
+        UPDATE job_stats SET
+            result_count=result_count + 1,
+            ok_count=ok_count + CASE WHEN json_extract(NEW.row_json,'$.status')='OK' THEN 1 ELSE 0 END,
+            fail_count=fail_count + CASE WHEN json_extract(NEW.row_json,'$.status')='FAIL' THEN 1 ELSE 0 END,
+            uncheckable_count=uncheckable_count + CASE WHEN json_extract(NEW.row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=NEW.job_id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS trg_job_stats_results_delete
+    AFTER DELETE ON results BEGIN
+        UPDATE job_stats SET
+            result_count=result_count - 1,
+            ok_count=ok_count - CASE WHEN json_extract(OLD.row_json,'$.status')='OK' THEN 1 ELSE 0 END,
+            fail_count=fail_count - CASE WHEN json_extract(OLD.row_json,'$.status')='FAIL' THEN 1 ELSE 0 END,
+            uncheckable_count=uncheckable_count - CASE WHEN json_extract(OLD.row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+            updated_at=CAST(strftime('%s','now') AS REAL)
+        WHERE job_id=OLD.job_id;
+    END
+    """,
+)
+
+
+def _sqlite_result_bucket_values(row_alias: str) -> tuple[str, str]:
+    status = f"COALESCE(json_extract({row_alias}.row_json,'$.status'),'')"
+    result_type = f"LOWER(COALESCE(json_extract({row_alias}.row_json,'$.result_type'),''))"
+    player_status = f"LOWER(COALESCE(json_extract({row_alias}.row_json,'$.player_status'),''))"
+    level_text = f"LOWER(COALESCE(json_extract({row_alias}.row_json,'$.level'),''))"
+    category = (
+        "CASE "
+        f"WHEN {status}='CHƯA THỂ CHECK' OR {result_type}='chưa thể check' THEN 'PENDING' "
+        f"WHEN UPPER({status})!='OK' OR {result_type} IN ('sai pass','không thể log') THEN 'FAIL' "
+        f"WHEN {player_status} LIKE '%khóa%' OR {player_status} LIKE '%ban%' "
+        f"OR {player_status} LIKE '%cấm%' THEN 'LOCKED' "
+        f"WHEN {level_text}='ctnv' OR {player_status} LIKE '%chưa tạo nhân vật%' THEN 'CTNV' "
+        "ELSE 'LEVEL' END"
+    )
+    level = f"CASE WHEN ({category})='LEVEL' THEN CAST({level_text} AS INTEGER) ELSE 0 END"
+    return category, level
+
+
+_SQLITE_NEW_RESULT_CATEGORY, _SQLITE_NEW_RESULT_LEVEL = _sqlite_result_bucket_values("NEW")
+_SQLITE_OLD_RESULT_CATEGORY, _SQLITE_OLD_RESULT_LEVEL = _sqlite_result_bucket_values("OLD")
+
+_SQLITE_RESULT_STATS_TRIGGERS = (
+    f"""
+    CREATE TRIGGER IF NOT EXISTS trg_job_result_stats_insert
+    AFTER INSERT ON results BEGIN
+        INSERT INTO job_result_stats (job_id, category, level, result_count)
+        VALUES (NEW.job_id, {_SQLITE_NEW_RESULT_CATEGORY}, {_SQLITE_NEW_RESULT_LEVEL}, 1)
+        ON CONFLICT(job_id, category, level) DO UPDATE SET result_count=result_count+1;
+    END
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS trg_job_result_stats_update
+    AFTER UPDATE OF job_id, row_json ON results BEGIN
+        UPDATE job_result_stats SET result_count=result_count-1
+        WHERE job_id=OLD.job_id AND category=({_SQLITE_OLD_RESULT_CATEGORY})
+          AND level=({_SQLITE_OLD_RESULT_LEVEL});
+        DELETE FROM job_result_stats WHERE job_id=OLD.job_id AND result_count<=0;
+        INSERT INTO job_result_stats (job_id, category, level, result_count)
+        VALUES (NEW.job_id, {_SQLITE_NEW_RESULT_CATEGORY}, {_SQLITE_NEW_RESULT_LEVEL}, 1)
+        ON CONFLICT(job_id, category, level) DO UPDATE SET result_count=result_count+1;
+    END
+    """,
+    f"""
+    CREATE TRIGGER IF NOT EXISTS trg_job_result_stats_delete
+    AFTER DELETE ON results BEGIN
+        UPDATE job_result_stats SET result_count=result_count-1
+        WHERE job_id=OLD.job_id AND category=({_SQLITE_OLD_RESULT_CATEGORY})
+          AND level=({_SQLITE_OLD_RESULT_LEVEL});
+        DELETE FROM job_result_stats WHERE job_id=OLD.job_id AND result_count<=0;
+    END
+    """,
+)
+
+
+_POSTGRES_JOB_STATS_TRIGGER_SQL = (
+    """
+    CREATE OR REPLACE FUNCTION maintain_job_stats_from_jobs() RETURNS TRIGGER AS $$
+    BEGIN
+        IF TG_OP = 'DELETE' THEN
+            DELETE FROM job_stats WHERE job_id=OLD.id;
+            RETURN OLD;
+        END IF;
+        INSERT INTO job_stats (job_id, total_accounts, job_status, updated_at)
+        VALUES (NEW.id, NEW.total, NEW.status, EXTRACT(EPOCH FROM CURRENT_TIMESTAMP))
+        ON CONFLICT(job_id) DO UPDATE SET
+            total_accounts=EXCLUDED.total_accounts,
+            job_status=EXCLUDED.job_status,
+            updated_at=EXCLUDED.updated_at;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_job_stats_jobs ON jobs",
+    "CREATE TRIGGER trg_job_stats_jobs AFTER INSERT OR UPDATE OF total, status OR DELETE ON jobs FOR EACH ROW EXECUTE FUNCTION maintain_job_stats_from_jobs()",
+    """
+    CREATE OR REPLACE FUNCTION maintain_job_stats_from_chunks() RETURNS TRIGGER AS $$
+    BEGIN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            UPDATE job_stats SET
+                pending_chunks=pending_chunks - CASE WHEN OLD.status='pending' THEN 1 ELSE 0 END,
+                claimed_chunks=claimed_chunks - CASE WHEN OLD.status='claimed' THEN 1 ELSE 0 END,
+                done_chunks=done_chunks - CASE WHEN OLD.status='done' THEN 1 ELSE 0 END,
+                updated_at=EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+            WHERE job_id=OLD.job_id;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            UPDATE job_stats SET
+                pending_chunks=pending_chunks + CASE WHEN NEW.status='pending' THEN 1 ELSE 0 END,
+                claimed_chunks=claimed_chunks + CASE WHEN NEW.status='claimed' THEN 1 ELSE 0 END,
+                done_chunks=done_chunks + CASE WHEN NEW.status='done' THEN 1 ELSE 0 END,
+                updated_at=EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+            WHERE job_id=NEW.job_id;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_job_stats_chunks ON chunks",
+    "CREATE TRIGGER trg_job_stats_chunks AFTER INSERT OR UPDATE OF job_id, status OR DELETE ON chunks FOR EACH ROW EXECUTE FUNCTION maintain_job_stats_from_chunks()",
+    """
+    CREATE OR REPLACE FUNCTION maintain_job_stats_from_results() RETURNS TRIGGER AS $$
+    BEGIN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            UPDATE job_stats SET
+                result_count=result_count - 1,
+                ok_count=ok_count - CASE WHEN COALESCE(OLD.row_json::jsonb ->> 'status','')='OK' THEN 1 ELSE 0 END,
+                fail_count=fail_count - CASE WHEN COALESCE(OLD.row_json::jsonb ->> 'status','')='FAIL' THEN 1 ELSE 0 END,
+                uncheckable_count=uncheckable_count - CASE WHEN COALESCE(OLD.row_json::jsonb ->> 'status','')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+                updated_at=EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+            WHERE job_id=OLD.job_id;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            UPDATE job_stats SET
+                result_count=result_count + 1,
+                ok_count=ok_count + CASE WHEN COALESCE(NEW.row_json::jsonb ->> 'status','')='OK' THEN 1 ELSE 0 END,
+                fail_count=fail_count + CASE WHEN COALESCE(NEW.row_json::jsonb ->> 'status','')='FAIL' THEN 1 ELSE 0 END,
+                uncheckable_count=uncheckable_count + CASE WHEN COALESCE(NEW.row_json::jsonb ->> 'status','')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END,
+                updated_at=EXTRACT(EPOCH FROM CURRENT_TIMESTAMP)
+            WHERE job_id=NEW.job_id;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_job_stats_results ON results",
+    "CREATE TRIGGER trg_job_stats_results AFTER INSERT OR UPDATE OF job_id, row_json OR DELETE ON results FOR EACH ROW EXECUTE FUNCTION maintain_job_stats_from_results()",
+    """
+    CREATE OR REPLACE FUNCTION aggregate_result_category(value TEXT) RETURNS TEXT AS $$
+        SELECT CASE
+            WHEN COALESCE(value::jsonb ->> 'status','')='CHƯA THỂ CHECK'
+              OR LOWER(COALESCE(value::jsonb ->> 'result_type',''))='chưa thể check' THEN 'PENDING'
+            WHEN UPPER(COALESCE(value::jsonb ->> 'status',''))!='OK'
+              OR LOWER(COALESCE(value::jsonb ->> 'result_type','')) IN ('sai pass','không thể log') THEN 'FAIL'
+            WHEN POSITION('khóa' IN LOWER(COALESCE(value::jsonb ->> 'player_status',''))) > 0
+              OR POSITION('ban' IN LOWER(COALESCE(value::jsonb ->> 'player_status',''))) > 0
+              OR POSITION('cấm' IN LOWER(COALESCE(value::jsonb ->> 'player_status',''))) > 0 THEN 'LOCKED'
+            WHEN LOWER(COALESCE(value::jsonb ->> 'level',''))='ctnv'
+              OR POSITION('chưa tạo nhân vật' IN LOWER(COALESCE(value::jsonb ->> 'player_status',''))) > 0 THEN 'CTNV'
+            ELSE 'LEVEL'
+        END
+    $$ LANGUAGE SQL IMMUTABLE
+    """,
+    """
+    CREATE OR REPLACE FUNCTION aggregate_result_level(value TEXT) RETURNS INTEGER AS $$
+        SELECT CASE
+            WHEN aggregate_result_category(value)='LEVEL'
+             AND COALESCE(value::jsonb ->> 'level','') ~ '^[0-9]+$'
+            THEN CAST(value::jsonb ->> 'level' AS INTEGER)
+            ELSE 0
+        END
+    $$ LANGUAGE SQL IMMUTABLE
+    """,
+    """
+    CREATE OR REPLACE FUNCTION maintain_job_result_stats() RETURNS TRIGGER AS $$
+    BEGIN
+        IF TG_OP IN ('UPDATE', 'DELETE') THEN
+            UPDATE job_result_stats SET result_count=result_count-1
+            WHERE job_id=OLD.job_id
+              AND category=aggregate_result_category(OLD.row_json)
+              AND level=aggregate_result_level(OLD.row_json);
+            DELETE FROM job_result_stats WHERE job_id=OLD.job_id AND result_count<=0;
+        END IF;
+        IF TG_OP IN ('INSERT', 'UPDATE') THEN
+            INSERT INTO job_result_stats (job_id, category, level, result_count)
+            VALUES (NEW.job_id, aggregate_result_category(NEW.row_json), aggregate_result_level(NEW.row_json), 1)
+            ON CONFLICT(job_id, category, level) DO UPDATE SET result_count=job_result_stats.result_count+1;
+        END IF;
+        IF TG_OP = 'DELETE' THEN
+            RETURN OLD;
+        END IF;
+        RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+    """,
+    "DROP TRIGGER IF EXISTS trg_job_result_stats ON results",
+    "CREATE TRIGGER trg_job_result_stats AFTER INSERT OR UPDATE OF job_id, row_json OR DELETE ON results FOR EACH ROW EXECUTE FUNCTION maintain_job_result_stats()",
+)
+
+
+def _backfill_job_stats_if_needed(store: Any) -> None:
+    """Build aggregate rows once for an existing database during migration."""
+    marker = store.fetchone(
+        "SELECT setting_value FROM app_settings WHERE setting_key='job_stats_version'"
+    )
+    if marker and str(marker[0]) == "2":
+        return
+    now = _now()
+    status = "COALESCE(json_extract(row_json,'$.status'),'')"
+    result_type = "LOWER(COALESCE(json_extract(row_json,'$.result_type'),''))"
+    player_status = "LOWER(COALESCE(json_extract(row_json,'$.player_status'),''))"
+    level_text = "LOWER(COALESCE(json_extract(row_json,'$.level'),''))"
+    if store.__class__.__name__ == "PostgreSQLStore":
+        locked = (
+            f"POSITION('khóa' IN {player_status}) > 0 OR POSITION('ban' IN {player_status}) > 0 "
+            f"OR POSITION('cấm' IN {player_status}) > 0"
+        )
+        ctnv = f"{level_text}='ctnv' OR POSITION('chưa tạo nhân vật' IN {player_status}) > 0"
+        numeric_level = (
+            f"CASE WHEN {level_text} ~ '^[0-9]+$' THEN CAST({level_text} AS INTEGER) ELSE 0 END"
+        )
+    else:
+        locked = (
+            f"INSTR({player_status},'khóa') > 0 OR INSTR({player_status},'ban') > 0 "
+            f"OR INSTR({player_status},'cấm') > 0"
+        )
+        ctnv = f"{level_text}='ctnv' OR INSTR({player_status},'chưa tạo nhân vật') > 0"
+        numeric_level = f"CAST({level_text} AS INTEGER)"
+    category = (
+        "CASE "
+        f"WHEN {status}='CHƯA THỂ CHECK' OR {result_type}='chưa thể check' THEN 'PENDING' "
+        f"WHEN UPPER({status})!='OK' OR {result_type} IN ('sai pass','không thể log') THEN 'FAIL' "
+        f"WHEN {locked} THEN 'LOCKED' "
+        f"WHEN {ctnv} THEN 'CTNV' "
+        "ELSE 'LEVEL' END"
+    )
+    bucket_backfill_sql = (
+        "INSERT INTO job_result_stats (job_id, category, level, result_count) "
+        "SELECT job_id, category, level, COUNT(*) FROM ("
+        f"SELECT job_id, {category} AS category, "
+        f"CASE WHEN ({category})='LEVEL' THEN {numeric_level} ELSE 0 END AS level FROM results"
+        ") categorized GROUP BY job_id, category, level"
+    )
+    store.batch([
+        {"sql": "DELETE FROM job_stats"},
+        {"sql": "DELETE FROM job_result_stats"},
+        {
+            "sql": (
+                "INSERT INTO job_stats ("
+                "job_id, total_accounts, job_status, pending_chunks, claimed_chunks, done_chunks, "
+                "result_count, ok_count, fail_count, uncheckable_count, updated_at"
+                ") SELECT j.id, j.total, j.status, "
+                "COALESCE(c.pending,0), COALESCE(c.claimed,0), COALESCE(c.done,0), "
+                "COALESCE(r.result_count,0), COALESCE(r.ok_count,0), "
+                "COALESCE(r.fail_count,0), COALESCE(r.uncheckable_count,0), ? "
+                "FROM jobs j LEFT JOIN ("
+                "SELECT job_id, "
+                "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
+                "SUM(CASE WHEN status='claimed' THEN 1 ELSE 0 END) AS claimed, "
+                "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
+                "FROM chunks GROUP BY job_id"
+                ") c ON c.job_id=j.id LEFT JOIN ("
+                "SELECT job_id, COUNT(*) AS result_count, "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) AS ok_count, "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END) AS fail_count, "
+                "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) AS uncheckable_count "
+                "FROM results GROUP BY job_id"
+                ") r ON r.job_id=j.id"
+            ),
+            "args": [now],
+        },
+        {"sql": bucket_backfill_sql},
+        {
+            "sql": (
+                "INSERT INTO app_settings (setting_key, setting_value) VALUES ('job_stats_version','2') "
+                "ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value"
+            )
+        },
+    ])
 
 
 def _now() -> float:
@@ -468,6 +891,13 @@ class TursoStore:
                 _run_async(self._aexec(mig))
             except Exception:
                 pass
+        for trigger_sql in (*_SQLITE_JOB_STATS_TRIGGERS, *_SQLITE_RESULT_STATS_TRIGGERS):
+            try:
+                _run_async(self._aexec(trigger_sql))
+            except Exception as exc:
+                print(f"[TursoStore] cannot install aggregate trigger: {exc}", flush=True)
+                raise
+        _backfill_job_stats_if_needed(self)
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
@@ -542,6 +972,10 @@ class LocalStore:
                 self._conn.commit()
             except Exception:
                 pass
+            for trigger_sql in (*_SQLITE_JOB_STATS_TRIGGERS, *_SQLITE_RESULT_STATS_TRIGGERS):
+                self._conn.execute(trigger_sql)
+            self._conn.commit()
+        _backfill_job_stats_if_needed(self)
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         with self._lock:
@@ -612,6 +1046,9 @@ class PostgreSQLStore:
                         "ALTER TABLE chunks ADD COLUMN IF NOT EXISTS avoid_satellite_id TEXT DEFAULT ''",
                     ]:
                         cur.execute(migration)
+                    for trigger_sql in _POSTGRES_JOB_STATS_TRIGGER_SQL:
+                        cur.execute(trigger_sql)
+        _backfill_job_stats_if_needed(self)
 
     def exec(self, sql: str, args: tuple = ()) -> int:
         prepared = self._sql(sql)
@@ -787,22 +1224,26 @@ def _prune_completed_jobs_before_today(store: Any, cutoff: float | None = None) 
     """Delete only completed jobs from previous local dates; never touch running jobs."""
     cutoff = _today_start_timestamp() if cutoff is None else float(cutoff)
     predicate = "created_at < ? AND status='done'"
-    old_jobs = store.fetchone(f"SELECT COUNT(*) FROM jobs WHERE {predicate}", (cutoff,))
-    old_chunks = store.fetchone(
-        f"SELECT COUNT(*) FROM chunks WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", (cutoff,)
-    )
-    old_results = store.fetchone(
-        f"SELECT COUNT(*) FROM results WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", (cutoff,)
+    old_totals = store.fetchone(
+        "SELECT COUNT(*), COALESCE(SUM(s.pending_chunks+s.claimed_chunks+s.done_chunks),0), "
+        "COALESCE(SUM(s.result_count),0) FROM jobs j "
+        "JOIN job_stats s ON s.job_id=j.id WHERE j.created_at < ? AND j.status='done'",
+        (cutoff,),
     )
     store.batch([
+        # Remove aggregates first so deleting a large expired job does not run
+        # one counter UPDATE for every result row. The following deletes remove
+        # the source rows in the same transaction/batch.
+        {"sql": f"DELETE FROM job_stats WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
+        {"sql": f"DELETE FROM job_result_stats WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
         {"sql": f"DELETE FROM results WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
         {"sql": f"DELETE FROM chunks WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
         {"sql": f"DELETE FROM jobs WHERE {predicate}", "args": (cutoff,)},
     ])
     return {
-        "jobs": int(old_jobs[0] if old_jobs else 0),
-        "chunks": int(old_chunks[0] if old_chunks else 0),
-        "results": int(old_results[0] if old_results else 0),
+        "jobs": int(old_totals[0] if old_totals else 0),
+        "chunks": int(old_totals[1] if old_totals else 0),
+        "results": int(old_totals[2] if old_totals else 0),
     }
 
 
@@ -843,7 +1284,7 @@ def _max_accounts_per_job(store: Any) -> int:
 
 def _running_job_count(store: Any) -> int:
     # "creating" reserves a slot until all chunks are committed and the job opens.
-    row = store.fetchone("SELECT COUNT(*) FROM jobs WHERE status IN ('creating','open')")
+    row = store.fetchone("SELECT COUNT(*) FROM job_stats WHERE job_status IN ('creating','open')")
     return int(row[0] or 0) if row else 0
 
 
@@ -1511,12 +1952,15 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
 
         store = self.server.store
-        job_count = store.fetchone("SELECT COUNT(*) FROM jobs")
-        chunk_count = store.fetchone("SELECT COUNT(*) FROM chunks")
-        result_count = store.fetchone("SELECT COUNT(*) FROM results")
+        totals = store.fetchone(
+            "SELECT COUNT(*), COALESCE(SUM(pending_chunks+claimed_chunks+done_chunks),0), "
+            "COALESCE(SUM(result_count),0) FROM job_stats"
+        )
         try:
             # Xóa bảng con trước để dùng được với cả SQLite lẫn Turso.
             store.batch([
+                {"sql": "DELETE FROM job_stats"},
+                {"sql": "DELETE FROM job_result_stats"},
                 {"sql": "DELETE FROM results"},
                 {"sql": "DELETE FROM chunks"},
                 {"sql": "DELETE FROM jobs"},
@@ -1527,9 +1971,9 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         self._json(HTTPStatus.OK, {
             "ok": True,
-            "jobs": int(job_count[0] if job_count else 0),
-            "chunks": int(chunk_count[0] if chunk_count else 0),
-            "results": int(result_count[0] if result_count else 0),
+            "jobs": int(totals[0] if totals else 0),
+            "chunks": int(totals[1] if totals else 0),
+            "results": int(totals[2] if totals else 0),
         })
 
     def _handle_prune_before_today(self) -> None:
@@ -1563,16 +2007,12 @@ class MasterHandler(BaseHTTPRequestHandler):
         is_admin = bool((auth or {}).get("is_admin"))
         # Phần tổng quan luôn phản ánh toàn hệ thống để mọi key đều biết tải hiện tại.
         # Danh sách/chi tiết job bên dưới vẫn giới hạn theo owner để không lộ dữ liệu.
-        # Keep the overview authoritative, but fetch all five system-wide counters
-        # in one database round-trip.  This matters especially for Turso, where a
-        # fetch is a network request rather than an in-process SQLite read.
+        # The overview scans one compact row per job, never the account results.
         overview_row = store.fetchone(
             "SELECT COUNT(*), "
-            "SUM(CASE WHEN status IN ('creating','open') THEN 1 ELSE 0 END), "
-            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END), "
-            "SUM(total), "
-            "(SELECT COUNT(*) FROM results) "
-            "FROM jobs"
+            "SUM(CASE WHEN job_status IN ('creating','open') THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN job_status='done' THEN 1 ELSE 0 END), "
+            "SUM(total_accounts), SUM(result_count) FROM job_stats"
         )
         overview = {
             "total_jobs": int((overview_row[0] if overview_row else 0) or 0),
@@ -1584,51 +2024,32 @@ class MasterHandler(BaseHTTPRequestHandler):
         # Nếu admin (MASTER_TOKEN) hoặc owner rỗng (legacy/dev) thì xem tất cả
         if is_admin or not owner_hash:
             jobs_raw = store.fetch(
-                "SELECT id, created_at, total, chunk_size, status, finished_at, owner_preview FROM jobs ORDER BY id DESC LIMIT 50"
+                "SELECT j.id, j.created_at, j.total, j.chunk_size, j.status, j.finished_at, j.owner_preview, "
+                "COALESCE(s.result_count,0), COALESCE(s.ok_count,0), COALESCE(s.fail_count,0), "
+                "COALESCE(s.uncheckable_count,0) FROM jobs j LEFT JOIN job_stats s ON s.job_id=j.id "
+                "ORDER BY j.id DESC LIMIT 50"
             )
         else:
             jobs_raw = store.fetch(
-                "SELECT id, created_at, total, chunk_size, status, finished_at, owner_preview FROM jobs WHERE owner_hash=? ORDER BY id DESC LIMIT 50",
+                "SELECT j.id, j.created_at, j.total, j.chunk_size, j.status, j.finished_at, j.owner_preview, "
+                "COALESCE(s.result_count,0), COALESCE(s.ok_count,0), COALESCE(s.fail_count,0), "
+                "COALESCE(s.uncheckable_count,0) FROM jobs j LEFT JOIN job_stats s ON s.job_id=j.id "
+                "WHERE j.owner_hash=? ORDER BY j.id DESC LIMIT 50",
                 (owner_hash,),
             )
-        # Aggregate result counters for every visible job at once.  Previously
-        # this was one SELECT per job (up to 50 extra remote DB calls per poll).
-        result_counts_by_job: dict[int, tuple[int, int, int, int]] = {}
-        job_ids = [int(row[0]) for row in jobs_raw]
-        if job_ids:
-            placeholders = ",".join("?" for _ in job_ids)
-            result_rows = store.fetch(
-                "SELECT job_id, COUNT(*), "
-                "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END), "
-                "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) "
-                f"FROM results WHERE job_id IN ({placeholders}) GROUP BY job_id",
-                tuple(job_ids),
-            )
-            for result_row in result_rows:
-                result_counts_by_job[int(result_row[0])] = (
-                    int(result_row[1] or 0),
-                    int(result_row[2] or 0),
-                    int(result_row[3] or 0),
-                    int(result_row[4] or 0),
-                )
-
         jobs = []
         for row in jobs_raw:
             job_id = row[0]
-            results_count, ok_count, fail_count, uncheckable_count = result_counts_by_job.get(
-                int(job_id), (0, 0, 0, 0)
-            )
             jobs.append({
                 "id": job_id,
                 "created_at": row[1],
                 "finished_at": row[5],
                 "total": row[2],
                 "status": row[4],
-                "processed": results_count,
-                "ok": ok_count,
-                "fail": fail_count,
-                "uncheckable": uncheckable_count,
+                "processed": int(row[7] or 0),
+                "ok": int(row[8] or 0),
+                "fail": int(row[9] or 0),
+                "uncheckable": int(row[10] or 0),
                 "owner_preview": row[6] if len(row) > 6 else "",
             })
         self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs, "overview": overview})
@@ -2105,16 +2526,16 @@ class MasterHandler(BaseHTTPRequestHandler):
 
     def _check_finish_all_jobs(self, now: float) -> None:
         store = self.server.store
-        open_jobs = store.fetch("SELECT id FROM jobs WHERE status='open'")
+        open_jobs = store.fetch(
+            "SELECT job_id, pending_chunks+claimed_chunks+done_chunks AS total_chunks, "
+            "pending_chunks+claimed_chunks AS unfinished_chunks "
+            "FROM job_stats WHERE job_status='open'"
+        )
         finished_any = False
         for item in open_jobs:
             job_id = item[0]
-            chunk_counts = store.fetchone(
-                "SELECT COUNT(*), SUM(CASE WHEN status!='done' THEN 1 ELSE 0 END) FROM chunks WHERE job_id=?",
-                (job_id,),
-            )
-            total_chunks = int(chunk_counts[0] or 0) if chunk_counts else 0
-            unfinished_chunks = int(chunk_counts[1] or 0) if chunk_counts else 0
+            total_chunks = int(item[1] or 0)
+            unfinished_chunks = int(item[2] or 0)
             # Job không có chunk là job chưa tạo xong/lỗi; tuyệt đối không tự đánh done.
             if total_chunks > 0 and unfinished_chunks == 0:
                 store.exec(
@@ -2156,29 +2577,16 @@ class MasterHandler(BaseHTTPRequestHandler):
 
     def _handle_job_summary(self, job_id: int, auth: dict[str, Any] | None = None) -> None:
         store = self.server.store
-        # Read the job, chunk progress and result totals in one DB round-trip.
-        # Remote stores no longer pay five sequential network latencies here.
+        # Read only the per-job aggregate row; this remains constant-time even
+        # when the job has millions of result records.
         summary = store.fetchone(
-            "WITH chunk_stats AS ("
-            "SELECT "
-            "SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, "
-            "SUM(CASE WHEN status='claimed' THEN 1 ELSE 0 END) AS claimed, "
-            "SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) AS done "
-            "FROM chunks WHERE job_id=?"
-            "), result_stats AS ("
-            "SELECT COUNT(*) AS result_count, "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='OK' THEN 1 ELSE 0 END) AS ok_count, "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='FAIL' THEN 1 ELSE 0 END) AS fail_count, "
-            "SUM(CASE WHEN json_extract(row_json,'$.status')='CHƯA THỂ CHECK' THEN 1 ELSE 0 END) AS uncheckable_count "
-            "FROM results WHERE job_id=?"
-            ") "
             "SELECT j.id, j.created_at, j.total, j.chunk_size, j.status, j.finished_at, "
             "j.owner_hash, j.owner_preview, "
-            "COALESCE(c.pending,0), COALESCE(c.claimed,0), COALESCE(c.done,0), "
-            "COALESCE(r.result_count,0), COALESCE(r.ok_count,0), "
-            "COALESCE(r.fail_count,0), COALESCE(r.uncheckable_count,0) "
-            "FROM jobs j CROSS JOIN chunk_stats c CROSS JOIN result_stats r WHERE j.id=?",
-            (job_id, job_id, job_id),
+            "COALESCE(s.pending_chunks,0), COALESCE(s.claimed_chunks,0), COALESCE(s.done_chunks,0), "
+            "COALESCE(s.result_count,0), COALESCE(s.ok_count,0), "
+            "COALESCE(s.fail_count,0), COALESCE(s.uncheckable_count,0) "
+            "FROM jobs j LEFT JOIN job_stats s ON s.job_id=j.id WHERE j.id=?",
+            (job_id,),
         )
         if summary is None:
             self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
@@ -2262,17 +2670,19 @@ class MasterHandler(BaseHTTPRequestHandler):
             "ELSE 'NOT_MET' END"
         )
 
+        # Category/level buckets are maintained with each result write. Reading
+        # filter totals touches at most a small set of buckets, not every result.
         category_rows = store.fetch(
-            f"SELECT category, COUNT(*) FROM ("
-            f"SELECT {category_sql} AS category FROM results WHERE job_id=?"
-            ") categorized GROUP BY category",
-            (min_level, job_id),
+            "SELECT category, level, result_count FROM job_result_stats WHERE job_id=?",
+            (job_id,),
         )
         category_counts = {"OK": 0, "NOT_MET": 0, "CTNV": 0, "LOCKED": 0, "FAIL": 0, "PENDING": 0}
-        for category, count in category_rows:
+        for category, level, count in category_rows:
             key = str(category or "")
+            if key == "LEVEL":
+                key = "OK" if int(level or 0) >= min_level else "NOT_MET"
             if key in category_counts:
-                category_counts[key] = int(count or 0)
+                category_counts[key] += int(count or 0)
         total_all = sum(category_counts.values())
 
         filter_sql = ""

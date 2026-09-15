@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -212,7 +213,138 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(captured["status"], 200)
         self.assertEqual(len(captured["payload"]["jobs"]), 12)
         self.assertTrue(all(job["processed"] == 1 for job in captured["payload"]["jobs"]))
-        self.assertEqual(counting_store.read_calls, 3)
+        self.assertEqual(counting_store.read_calls, 2)
+
+    def test_job_stats_follow_result_upserts_and_deletes(self) -> None:
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
+            (1, 2, 15, "open"),
+        )
+        chunk_id = self.inner.exec(
+            "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+            (job_id, 0, "[]"),
+        )
+        insert_sql = (
+            "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET "
+            "row_json=excluded.row_json, reported_at=excluded.reported_at"
+        )
+        self.inner.exec(insert_sql, (chunk_id, job_id, "a", '{"status":"OK"}', 2))
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT result_count, ok_count, fail_count, uncheckable_count FROM job_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            (1, 1, 0, 0),
+        )
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT category, level, result_count FROM job_result_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            ("LEVEL", 0, 1),
+        )
+
+        self.inner.exec(insert_sql, (chunk_id, job_id, "a", '{"status":"FAIL"}', 3))
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT result_count, ok_count, fail_count, uncheckable_count FROM job_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            (1, 0, 1, 0),
+        )
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT category, level, result_count FROM job_result_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            ("FAIL", 0, 1),
+        )
+
+        self.inner.exec("DELETE FROM results WHERE chunk_id=? AND account=?", (chunk_id, "a"))
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT result_count, ok_count, fail_count, uncheckable_count FROM job_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            (0, 0, 0, 0),
+        )
+
+    def test_job_stats_follow_chunk_and_job_status_updates(self) -> None:
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
+            (1, 10, 15, "creating"),
+        )
+        chunk_id = self.inner.exec(
+            "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+            (job_id, 0, "[]"),
+        )
+        self.inner.exec("UPDATE jobs SET status='open' WHERE id=?", (job_id,))
+        self.inner.exec("UPDATE chunks SET status='claimed' WHERE id=?", (chunk_id,))
+        self.inner.exec("UPDATE chunks SET status='done' WHERE id=?", (chunk_id,))
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT total_accounts, job_status, pending_chunks, claimed_chunks, done_chunks "
+                "FROM job_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            (10, "open", 0, 0, 1),
+        )
+
+    def test_existing_database_is_backfilled_once(self) -> None:
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript("""
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, created_at REAL NOT NULL,
+                total INTEGER NOT NULL, chunk_size INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'open', finished_at REAL,
+                owner_hash TEXT DEFAULT '', owner_preview TEXT DEFAULT ''
+            );
+            CREATE TABLE chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL, account TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending', satellite_id TEXT DEFAULT '',
+                claimed_at REAL, lease_until REAL, reported_at REAL,
+                retry_round INTEGER NOT NULL DEFAULT 1, avoid_satellite_id TEXT DEFAULT '',
+                UNIQUE(job_id, idx)
+            );
+            CREATE TABLE results (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, chunk_id INTEGER NOT NULL,
+                job_id INTEGER NOT NULL, account TEXT NOT NULL, row_json TEXT NOT NULL,
+                reported_at REAL NOT NULL, UNIQUE(chunk_id, account)
+            );
+            CREATE TABLE app_settings (setting_key TEXT PRIMARY KEY, setting_value TEXT NOT NULL);
+            INSERT INTO jobs (id, created_at, total, chunk_size, status) VALUES (7, 1, 2, 15, 'open');
+            INSERT INTO chunks (id, job_id, idx, account, status) VALUES (9, 7, 0, '[]', 'done');
+            INSERT INTO results (chunk_id, job_id, account, row_json, reported_at)
+            VALUES (9, 7, 'a', '{"status":"OK","level":"15"}', 2);
+        """)
+        connection.commit()
+        connection.close()
+
+        migrated = LocalStore(legacy_path)
+        try:
+            self.assertEqual(
+                migrated.fetchone(
+                    "SELECT total_accounts, done_chunks, result_count, ok_count FROM job_stats WHERE job_id=7"
+                ),
+                (2, 1, 1, 1),
+            )
+            self.assertEqual(
+                migrated.fetchone(
+                    "SELECT category, level, result_count FROM job_result_stats WHERE job_id=7"
+                ),
+                ("LEVEL", 15, 1),
+            )
+            self.assertEqual(
+                migrated.fetchone(
+                    "SELECT setting_value FROM app_settings WHERE setting_key='job_stats_version'"
+                )[0],
+                "2",
+            )
+        finally:
+            migrated._conn.close()
 
     def test_job_summary_uses_one_database_read(self) -> None:
         job_id = self.inner.exec(
