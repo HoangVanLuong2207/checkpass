@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
+from satellite_keepawake import keepawake_loop
 
 DEFAULT_CHUNK_LIMIT = 15
 # Chunk được cố định để tránh client thay đổi kích thước qua API.
@@ -3017,6 +3018,13 @@ def main() -> int:
         daemon=True,
     )
     retention_thread.start()
+    keepawake_stop = threading.Event()
+    keepawake_thread = threading.Thread(
+        target=keepawake_loop,
+        args=(store, keepawake_stop, DEFAULT_SATELLITE_TARGETS, parse_satellite_targets),
+        name="master-satellite-keepawake", daemon=True,
+    )
+    keepawake_thread.start()
     license_url = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
     print(f"[master] Tổng bộ: http://{host}:{port}  role=coordinator  db={db_label}")
     print(f"[master] LICENSE_SERVER_URL = '{license_url}'")
@@ -3029,6 +3037,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[master] Đã dừng.")
     finally:
+        keepawake_stop.set()
+        keepawake_thread.join(timeout=2)
         retention_stop.set()
         retention_thread.join(timeout=2)
         server.server_close()
