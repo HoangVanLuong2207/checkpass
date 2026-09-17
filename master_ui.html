@@ -2365,7 +2365,7 @@ function renderFilteredRows() {
     } else if (cat === 'CTNV') {
       tagClass = 'tag-badge ctnv';
       tagIcon = '<i class="fa-solid fa-user-plus"></i>';
-      tagText = 'Chưa tạo nhân vật';
+      tagText = 'CTNV';
     } else if (cat === 'LOCKED') {
       tagClass = 'tag-badge locked';
       tagIcon = '<i class="fa-solid fa-lock"></i>';
@@ -2389,8 +2389,8 @@ function renderFilteredRows() {
     const psLower = String(row.player_status || '').toLowerCase();
     if (psLower.includes('khóa') || psLower.includes('ban')) {
       playerStatusHtml = '<span class="tag-badge locked"><i class="fa-solid fa-lock"></i> ' + esc(row.player_status) + '</span>';
-    } else if (psLower.includes('chưa tạo nhân vật')) {
-      playerStatusHtml = '<span class="tag-badge ctnv"><i class="fa-solid fa-user-plus"></i> ' + esc(row.player_status) + '</span>';
+    } else if (psLower.includes('chưa tạo nhân vật') || psLower === 'ctnv' || cat === 'CTNV') {
+      playerStatusHtml = '<span class="tag-badge ctnv"><i class="fa-solid fa-user-plus"></i> CTNV</span>';
     }
 
     h += '<tr>' +
