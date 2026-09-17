@@ -2344,7 +2344,7 @@ function renderFilteredRows() {
   }
 
   let h = '<div class="table-scroll-container"><table class="data-table"><thead><tr>' +
-    '<th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên nhân vật</th><th>Cấp độ</th><th>Thông tin Acc</th>' +
+    '<th>STT</th><th>Tài khoản</th><th>Trạng thái</th><th>UID</th><th>Tên nhân vật</th><th>Cấp độ</th><th>Ngày tạo (UTC+7)</th><th>Thông tin Acc</th>' +
     '</tr></thead><tbody>';
 
   rows.forEach(row => {
@@ -2399,6 +2399,7 @@ function renderFilteredRows() {
       '<td>' + esc(row.uid || '-') + '</td>' +
       '<td>' + esc(row.name || '-') + '</td>' +
       '<td>' + lvl + '</td>' +
+      '<td>' + esc(row.registerDate || '-') + '</td>' +
       '<td>' + playerStatusHtml + '</td>' +
     '</tr>';
   });
