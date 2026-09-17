@@ -2399,7 +2399,7 @@ function renderFilteredRows() {
       '<td>' + esc(row.uid || '-') + '</td>' +
       '<td>' + esc(row.name || '-') + '</td>' +
       '<td>' + lvl + '</td>' +
-      '<td>' + esc(row.registerDate || '-') + '</td>' +
+      '<td>' + esc(String(row.registerDate || '-').split(' ')[0]) + '</td>' +
       '<td>' + playerStatusHtml + '</td>' +
     '</tr>';
   });
