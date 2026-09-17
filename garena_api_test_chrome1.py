@@ -1,5 +1,6 @@
 
 import argparse
+from export_dates import registration_date
 import base64
 import csv
 import functools
@@ -2552,7 +2553,9 @@ class Handler(BaseHTTPRequestHandler):
                         for ci,col_name in enumerate(col_names,1):
                             value=row.get(col_name,"")
                             if col_name == "registerDate":
-                                value=str(value or "").split(" ", 1)[0]
+                                cell=ws.cell(row=ri,column=ci,value=registration_date(value))
+                                cell.number_format="dd/mm/yyyy"
+                                continue
                             if col_name == "account":
                                 value=row.get("_credential") or value
                             if isinstance(value, str):

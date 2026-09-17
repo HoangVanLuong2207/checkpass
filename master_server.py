@@ -8,6 +8,7 @@ không chạy Garena check; dữ liệu nằm trong SQLite trên đĩa.
 """
 
 import argparse
+from export_dates import registration_date
 import asyncio
 import csv
 from datetime import datetime, timedelta, timezone
@@ -2907,7 +2908,9 @@ class MasterHandler(BaseHTTPRequestHandler):
                             row.get("_export_credential") or row.get(field, "") or ""
                         ) if field == "account" else str(row.get(field, "") or "")
                         if field == "registerDate":
-                            value = value.split(" ", 1)[0]
+                            cell = worksheet.cell(row=row_index, column=column, value=registration_date(value))
+                            cell.number_format = "dd/mm/yyyy"
+                            continue
                         # Excel rejects ASCII control characters in cell values.
                         value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", value)
                         worksheet.cell(row=row_index, column=column, value=value)
