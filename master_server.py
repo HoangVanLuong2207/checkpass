@@ -1585,6 +1585,15 @@ class MasterHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         try:
             path = self._clean_path()
+            if path == "/favicon.svg":
+                body = (Path(__file__).parent / "favicon.svg").read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "image/svg+xml")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == "/healthz":
                 mt = self.server.master_token or ""
                 lu = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
