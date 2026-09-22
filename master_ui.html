@@ -1425,7 +1425,7 @@ table.data-table tbody tr:hover {
         <span id="ownerBadgeText">Đang tải key...</span>
       </div>
 
-      <button class="btn btn-primary btn-sm" onclick="openSubmitModal()">
+      <button class="btn btn-primary btn-sm" id="createJobBtn" onclick="openSubmitModal()">
         <i class="fa-solid fa-plus"></i> Tạo Job Mới
       </button>
 
@@ -1683,6 +1683,7 @@ const JOBS_EXPAND_MS = 480;
 let jobsCache = [];
 let jobsLoading = false;
 let isAdminKey = false;
+let canCreateJobs = false;
 let maxAccountsPerJob = null;
 let currentRawRows = [];
 let currentFilter = 'all';
@@ -1727,6 +1728,10 @@ function openSubmitModal() {
   if (!TOKEN) {
     toast('⚠️ Vui lòng cấu hình License Key trước khi tạo job');
     openKeyModal();
+    return;
+  }
+  if (!canCreateJobs) {
+    toast('⚠️ Key đã hết hạn hoặc không còn hiệu lực. Bạn vẫn có thể xem lịch sử job nhưng không thể tạo job mới.');
     return;
   }
   openModal('submitModal');
@@ -1816,6 +1821,14 @@ function setClearAllButton(visible) {
   if (adminBtn) adminBtn.style.display = visible ? 'inline-flex' : 'none';
 }
 
+function setCreateJobAvailability(allowed) {
+  canCreateJobs = allowed === true;
+  const btn = document.getElementById('createJobBtn');
+  if (!btn) return;
+  btn.disabled = !canCreateJobs;
+  btn.title = canCreateJobs ? '' : 'Key hết hạn chỉ được xem lịch sử job';
+}
+
 function openAdminPage() {
   window.location.href = '/admin';
 }
@@ -1894,6 +1907,7 @@ async function checkKey() {
     const r = await fetch('/api/verify?token=' + encodeURIComponent(TOKEN), { headers: getHeaders() });
     const j = await r.json();
     if (j.valid || j.ok) {
+      setCreateJobAvailability(j.can_create_job !== false);
       isAdminKey = j.is_admin === true;
       const configuredLimit = Number(j.max_accounts_per_job);
       maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
@@ -1907,7 +1921,19 @@ async function checkKey() {
       st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (isAdminKey ? ' · <strong>Quyền Admin</strong>' : '') + accountLimitText + (isAdminKey ? ' · Không áp dụng giới hạn 1 job/key' : ' · 1 job đang chạy/key');
       return true;
     }
+    if (j.history_access) {
+      isAdminKey = false;
+      maxAccountsPerJob = null;
+      setClearAllButton(false);
+      setCreateJobAvailability(false);
+      updateAccountCounter();
+      st.style.background = '#FEF3C7';
+      st.style.color = '#B45309';
+      st.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Key đã hết hạn hoặc không còn hiệu lực. Chỉ có thể xem lịch sử job, không thể tạo job mới.';
+      return true;
+    }
     isAdminKey = false;
+    setCreateJobAvailability(false);
     maxAccountsPerJob = null;
     updateAccountCounter();
     setClearAllButton(false);
@@ -1917,6 +1943,7 @@ async function checkKey() {
     return false;
   } catch(e) {
     isAdminKey = false;
+    setCreateJobAvailability(false);
     maxAccountsPerJob = null;
     updateAccountCounter();
     setClearAllButton(false);

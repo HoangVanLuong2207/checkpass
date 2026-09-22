@@ -1464,7 +1464,10 @@ class MasterHandler(BaseHTTPRequestHandler):
                 return {"authorized": True, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token, "license_info": info}
             # Verify fail — log để debug
             print(f"[master] auth FAIL: token='{_preview_key(token)}' license_url='{license_url}' info={info}", flush=True)
-            return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": token, "license_info": info}
+            # Preserve the deterministic owner identity even after expiry.
+            # Possession of the original key may unlock only that key's stored
+            # jobs; creating new work still requires a valid license.
+            return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": _hash_key(token), "owner_preview": _preview_key(token), "token": token, "license_info": info}
         # Không có token
         return {"authorized": False, "is_admin": False, "is_satellite": False, "owner_hash": "", "owner_preview": "", "token": ""}
 
@@ -1493,6 +1496,17 @@ class MasterHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": msg})
             return None
         return info
+
+    def _require_job_owner(self) -> dict[str, Any] | None:
+        """Allow access to jobs owned by the supplied key, even after expiry."""
+        info = self._get_auth_info()
+        if info.get("authorized"):
+            return info
+        if info.get("token") and info.get("owner_hash"):
+            info["history_only"] = True
+            return info
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "thiếu license key"})
+        return None
 
     def _require_satellite(self) -> dict[str, Any] | None:
         """Vệ tinh chỉ cần MASTER_TOKEN, không cần license key. Master có license key là đủ."""
@@ -1624,6 +1638,8 @@ class MasterHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, {
                         "ok": True,
                         "valid": True,
+                        "history_access": True,
+                        "can_create_job": True,
                         "is_admin": True,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
@@ -1635,13 +1651,15 @@ class MasterHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.OK, {
                         "ok": True,
                         "valid": True,
+                        "history_access": True,
+                        "can_create_job": True,
                         "is_admin": False,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
                         "info": info,
                     })
                 else:
-                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "error": info.get("error") or "key không hợp lệ", "info": info,
+                    self._json(HTTPStatus.OK, {"ok": False, "valid": False, "history_access": True, "can_create_job": False, "error": info.get("error") or "key không hợp lệ", "info": info,
                         "debug": {"token_len": len(tok), "master_token_len": len(mt), "token_preview": _preview_key(tok)}})
                 return
             if path == "/" or path == "/index.html":
@@ -1659,7 +1677,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self._handle_prune_before_today()
                 return
             # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
-            auth = self._require_user()
+            auth = self._require_job_owner()
             if auth is None:
                 return
             if path == "/api/jobs_list":
@@ -1738,7 +1756,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 return
             parts = path.strip("/").split("/")
             if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs" and parts[3] == "stop":
-                auth = self._require_user()
+                auth = self._require_job_owner()
                 if auth is None:
                     return
                 job_id = self._int_or_none(parts[2])
