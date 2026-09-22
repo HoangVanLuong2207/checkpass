@@ -4,11 +4,14 @@ import json
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from unittest import mock
 from pathlib import Path
 
+import master_server
 from master_server import (
     CoordinatorServer,
     LocalStore,
@@ -94,6 +97,23 @@ class JobCreationRaceTest(unittest.TestCase):
     def post_error(self, path: str, body: dict, token: str = "secret") -> tuple[int, dict]:
         try:
             return self.post(path, body, token)
+        except urllib.error.HTTPError as exc:
+            try:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+            finally:
+                exc.close()
+
+    def get(self, path: str, token: str = "secret") -> tuple[int, dict]:
+        request = urllib.request.Request(
+            self.base_url + path,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+
+    def get_error(self, path: str, token: str = "secret") -> tuple[int, dict]:
+        try:
+            return self.get(path, token)
         except urllib.error.HTTPError as exc:
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
@@ -458,6 +478,49 @@ class JobCreationRaceTest(unittest.TestCase):
         status, other_key_job = self.post("/api/jobs", {"text": "user3|pass3"}, token="key-b")
         self.assertEqual(status, 200)
         self.assertNotEqual(other_key_job["job_id"], first["job_id"])
+
+    def test_expired_key_can_read_history_but_cannot_create_job(self) -> None:
+        self.store.block_once = False
+        _, created = self.post("/api/jobs", {"text": "history-user|pass"}, token="expired-key")
+        job_id = created["job_id"]
+
+        with mock.patch.object(
+            master_server,
+            "_verify_license_key",
+            return_value=(False, {"error": "key expired"}),
+        ):
+            status, verification = self.get("/api/verify", token="expired-key")
+            self.assertEqual(status, 200)
+            self.assertFalse(verification["valid"])
+            self.assertTrue(verification["history_access"])
+            self.assertFalse(verification["can_create_job"])
+
+            status, history = self.get("/api/jobs_list", token="expired-key")
+            self.assertEqual(status, 200)
+            self.assertEqual([job["id"] for job in history["jobs"]], [job_id])
+
+            status, summary = self.get(f"/api/jobs/{job_id}", token="expired-key")
+            self.assertEqual(status, 200)
+            self.assertEqual(summary["job_id"], job_id)
+
+            status, stopped = self.post(f"/api/jobs/{job_id}/stop", {}, token="expired-key")
+            self.assertEqual(status, 200)
+            self.assertEqual(stopped["status"], "done")
+
+            status, rows = self.get(f"/api/jobs/{job_id}/rows", token="expired-key")
+            self.assertEqual(status, 200)
+            self.assertEqual(rows["total"], 1)
+            self.assertEqual(len(rows["rows"]), 1)
+
+            status, forbidden = self.get_error(f"/api/jobs/{job_id}", token="different-key")
+            self.assertEqual(status, 403)
+            self.assertFalse(forbidden["ok"])
+
+            status, rejected = self.post_error(
+                "/api/jobs", {"text": "new-user|pass"}, token="expired-key"
+            )
+            self.assertEqual(status, 401)
+            self.assertFalse(rejected["ok"])
 
     def test_admin_key_is_exempt_from_running_job_limit_per_key(self) -> None:
         self.store.block_once = False
