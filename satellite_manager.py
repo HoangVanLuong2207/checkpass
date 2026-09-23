@@ -51,7 +51,7 @@ class SatelliteManager:
         self.master_token = tk.StringVar(value=os.environ.get("MASTER_TOKEN", ""))
         self.workers = tk.StringVar(value=os.environ.get("WORKERS", "4"))
         self.concurrent_chunks = tk.StringVar(value=os.environ.get("CONCURRENT_CHUNKS", "1"))
-        self.start_gap = tk.StringVar(value=os.environ.get("START_GAP", "2"))
+        self.start_gap = tk.StringVar(value=os.environ.get("START_GAP", "10"))
         self.timeout = tk.StringVar(value=os.environ.get("TIMEOUT", "20"))
         self.poll_interval = tk.StringVar(value=os.environ.get("POLL_INTERVAL", "10"))
         self.proxies = tk.StringVar(value=os.environ.get("GARENA_PROXIES", ""))
