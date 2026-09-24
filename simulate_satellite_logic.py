@@ -16,7 +16,6 @@ import sys
 import threading
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Callable
 
 
@@ -189,7 +188,7 @@ def run_simulation(project: Path) -> None:
     require(engine.BATCH_MAX_ATTEMPTS == 4, "Initial check plus 3 retries must total 4")
 
     fast = engine.run_api_tests(
-        SimpleNamespace(GarenaTcpClient=FastLoginClient),
+        type("FastTcpModule", (), {"GarenaTcpClient": FastLoginClient}),
         "simulation-account",
         "simulation-password",
         1.0,
@@ -203,25 +202,30 @@ def run_simulation(project: Path) -> None:
         "LOGIN under 600 ms was incorrectly labeled rate limit",
     )
     require(
-        not fast["tcp"].get("credential_rejected"),
-        "LOGIN under 600 ms was incorrectly finalized as login failure",
+        fast["tcp"].get("credential_rejected") is True,
+        "LOGIN 0x101 rejection was not recorded for batch confirmation",
     )
 
     prepare = engine.run_api_tests(
-        SimpleNamespace(GarenaTcpClient=PrepareClient),
+        type("PrepareTcpModule", (), {"GarenaTcpClient": PrepareClient}),
         "simulation-account",
         "simulation-password",
         1.0,
     )
     require(
-        prepare["tcp"].get("credential_rejected") is True,
-        "LOGIN_PREPARE rejection was not finalized as login failure",
+        not prepare["tcp"].get("credential_rejected"),
+        "LOGIN_PREPARE was incorrectly treated as credential failure",
     )
     prepare_row = batch_case(engine, lambda *_args: prepare)
-    require(prepare_row.get("status") == "FAIL", "LOGIN_PREPARE must return FAIL")
+    require(prepare_row.get("status") == PENDING_STATUS, "LOGIN_PREPARE must stay pending")
     require(
-        prepare_row.get("result_type") == LOGIN_FAIL_TYPE,
-        "LOGIN_PREPARE must return 'Khong the log'",
+        prepare_row.get("result_type") == PENDING_TYPE,
+        "LOGIN_PREPARE must return 'Chua the check'",
+    )
+    prepare_public = engine.public_batch_row(prepare_row)
+    require(
+        prepare_public.get("last_tcp_rejection_stage") == "LOGIN_PREPARE",
+        "LOGIN_PREPARE diagnostic stage was not preserved",
     )
 
     successful = {
@@ -253,15 +257,32 @@ def run_simulation(project: Path) -> None:
         return fast
 
     exhausted_row = batch_case(engine, always_fast)
-    require(fast_attempts[0] == 4, "Pending fast response did not receive 3 retries")
+    require(fast_attempts[0] == 2, "Repeated LOGIN rejection was not confirmed twice")
     require(
-        exhausted_row.get("status") == PENDING_STATUS,
-        "Exhausted fast responses must remain pending",
+        exhausted_row.get("status") == "FAIL",
+        "Repeated LOGIN rejection must fail",
     )
     require(
-        exhausted_row.get("result_type") == PENDING_TYPE,
-        "Exhausted fast responses must be 'Chua the check'",
+        exhausted_row.get("result_type") == LOGIN_FAIL_TYPE,
+        "Repeated LOGIN rejection must be 'Khong the log'",
     )
+
+    changing_codes = iter((1, 2, 1, 2))
+
+    def changing_login_rejection(*_args: Any) -> dict[str, Any]:
+        return {
+            "tcp": {
+                "ok": False,
+                "credential_rejected": True,
+                "rejection_command": 0x101,
+                "rejection_result": next(changing_codes),
+            },
+            "apis": {},
+            "web_auth": {},
+        }
+
+    changing_row = batch_case(engine, changing_login_rejection)
+    require(changing_row.get("status") == PENDING_STATUS, "Changing reject codes must stay pending")
 
     rate_limit = {
         "tcp": {"ok": False, "rate_limit_suspected": True},
@@ -303,20 +324,34 @@ def run_simulation(project: Path) -> None:
         not engine.tcp_fast_login_rejection_should_retry(slow_rejection, 900),
         "LOGIN at 900 ms must not use the fast-response retry rule",
     )
-    slow_row = batch_case(
-        engine,
-        lambda *_args: {
-            "tcp": {"ok": False, "credential_rejected": True},
+    confirmed_attempts = [0]
+
+    def confirmed_login_rejection(*_args: Any) -> dict[str, Any]:
+        confirmed_attempts[0] += 1
+        return {
+            "tcp": {
+                "ok": False,
+                "credential_rejected": True,
+                "rejection_command": 0x101,
+                "rejection_result": 1,
+            },
             "apis": {},
             "web_auth": {},
-        },
-    )
+        }
+
+    slow_row = batch_case(engine, confirmed_login_rejection)
+    require(confirmed_attempts[0] == 2, "LOGIN rejection must be confirmed twice")
     require(slow_row.get("status") == "FAIL", "Confirmed LOGIN rejection must fail")
     require(slow_row.get("result_type") == LOGIN_FAIL_TYPE, "Wrong login-failure type")
+    slow_public = engine.public_batch_row(slow_row)
+    require(slow_public.get("last_tcp_rejection_stage") == "LOGIN", "Missing LOGIN stage")
+    require(slow_public.get("last_tcp_rejection_result") == "1", "Missing reject code")
+    require(slow_public.get("login_rejection_confirmations") == "2", "Missing confirmations")
 
     print(f"PASS: {project}")
-    print("  LOGIN_PREPARE rejection -> FAIL / Khong the log")
-    print("  LOGIN under 600 ms      -> retry")
+    print("  LOGIN_PREPARE rejection -> retry / Chua the check")
+    print("  LOGIN under 600 ms      -> require confirmation")
+    print("  Changing LOGIN codes    -> Chua the check")
     print("  Retry succeeds          -> OK")
     print("  Retry limit exhausted   -> Chua the check")
     print("  HTTP 429/rate-limit     -> Chua the check")
@@ -327,7 +362,13 @@ def discover_projects(script_path: Path) -> list[Path]:
     parent = script_path.parent.parent
     return [
         candidate
-        for candidate in (parent / "checkpass", parent / "checkpass1", parent / "checkpass2", parent / "checkpass3")
+        for candidate in (
+            parent / "checkpass",
+            parent / "checkpass1",
+            parent / "checkpass2",
+            parent / "checkpass3",
+            parent / "checkpass4",
+        )
         if (candidate / "garena_api_test_chrome1.py").is_file()
     ]
 
@@ -342,7 +383,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--all",
         action="store_true",
-        help="Test checkpass, checkpass1, checkpass2 and checkpass3",
+        help="Test checkpass and checkpass1 through checkpass4",
     )
     parser.add_argument(
         "--accounts",
