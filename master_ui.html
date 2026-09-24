@@ -1955,7 +1955,9 @@ async function refreshQuote() {
     const amount = Number(data.amount || 0).toLocaleString('vi-VN', { maximumFractionDigits: 1 });
     const available = Number(data.available_balance || currentSession?.available_balance || 0)
       .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
-    let message = data.covered_by_time
+    let message = data.mode === 'admin' || isAdminKey
+      ? '<strong style="color:#047857"><i class="fa-solid fa-crown"></i> Quyền Quản trị viên: Miễn phí hoàn toàn, không giới hạn tài khoản.</strong>'
+      : data.covered_by_time
       ? '<strong style="color:#047857">Đang có quyền theo giờ: không trừ thêm tiền.</strong>'
       : '<strong>Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
     if (mode === 'quantity') {
