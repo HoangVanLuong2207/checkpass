@@ -1601,6 +1601,57 @@ table.data-table tbody tr:hover {
   </div>
 </div>
 
+<!-- Modal Chọn Hình Thức Thanh Toán -->
+<div class="modal-backdrop" id="billingSelectModal" onclick="if(event.target===this)closeModal('billingSelectModal')">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="billingSelectModalTitle">
+    <div class="modal-head">
+      <div>
+        <h2 id="billingSelectModalTitle"><i class="fa-solid fa-wallet" style="color:var(--secondary)"></i> Chọn Hình Thức Thanh Toán</h2>
+        <p>Chọn phương thức tính phí phù hợp cho phiên check tài khoản của bạn</p>
+      </div>
+      <button class="icon-btn" title="Đóng" onclick="closeModal('billingSelectModal')"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="modal-body" style="padding:16px 20px">
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <!-- Lựa chọn 1: Theo số lượng -->
+        <div onclick="selectBillingModeAndProceed('quantity')" style="border:2px solid #e2e8f0;border-radius:12px;padding:16px;cursor:pointer;transition:all 0.2s;background:#ffffff;display:flex;align-items:flex-start;gap:14px" onmouseover="this.style.borderColor='var(--secondary)';this.style.background='#fff7ed'" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#ffffff'">
+          <div style="width:40px;height:40px;border-radius:10px;background:#ffedd5;color:var(--secondary);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">
+            <i class="fa-solid fa-list-check"></i>
+          </div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <strong style="font-size:15px;color:var(--text)">Theo số lượng tài khoản</strong>
+              <span style="font-size:12px;font-weight:700;color:var(--secondary);background:#fff7ed;padding:2px 8px;border-radius:6px;border:1px solid #fed7aa">0,3đ / acc OK</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
+              Chỉ tính tiền các nick <strong>ĐÚNG MẬT KHẨU (OK)</strong>. Sai pass, 2FA hoặc lỗi sẽ được hoàn lại 100%. Phù hợp check số lượng ít hoặc vừa.
+            </div>
+          </div>
+        </div>
+
+        <!-- Lựa chọn 2: Theo thời gian -->
+        <div onclick="selectBillingModeAndProceed('time')" style="border:2px solid #e2e8f0;border-radius:12px;padding:16px;cursor:pointer;transition:all 0.2s;background:#ffffff;display:flex;align-items:flex-start;gap:14px" onmouseover="this.style.borderColor='var(--primary)';this.style.background='#f0fdf4'" onmouseout="this.style.borderColor='#e2e8f0';this.style.background='#ffffff'">
+          <div style="width:40px;height:40px;border-radius:10px;background:#dcfce7;color:#16a34a;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">
+            <i class="fa-solid fa-stopwatch"></i>
+          </div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <strong style="font-size:15px;color:var(--text)">Theo thời gian (Thuê giờ)</strong>
+              <span style="font-size:12px;font-weight:700;color:#16a34a;background:#f0fdf4;padding:2px 8px;border-radius:6px;border:1px solid #bbf7d0">5.000đ / 30 phút</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
+              Không giới hạn số lượng tài khoản check trong suốt thời gian thuê. Rất tiết kiệm nếu check số lượng lớn từ hàng nghìn acc trở lên.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer" style="justify-content:flex-end">
+      <button class="btn btn-secondary btn-sm" onclick="closeModal('billingSelectModal')">Đóng</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal Tạo Job -->
 <div class="modal-backdrop" id="submitModal" onclick="if(event.target===this)closeModal('submitModal')">
   <div class="modal-box modal-wide" role="dialog" aria-modal="true" aria-labelledby="submitModalTitle">
@@ -1626,17 +1677,16 @@ table.data-table tbody tr:hover {
       <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
 
       <div style="margin-top:16px;padding:14px;border:1px solid #fed7aa;border-radius:12px;background:#fffaf5">
-        <div class="form-label" style="margin-bottom:10px">Hình thức tính phí</div>
-        <label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:10px;cursor:pointer">
-          <input type="radio" name="billingMode" value="quantity" checked onchange="billingModeChanged()">
-          <span><strong>Theo số lượng</strong><br><small>Tạm giữ tối đa 0,3đ/tài khoản; chỉ trừ theo số tài khoản OK khi job hoàn tất.</small></span>
-        </label>
-        <label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer">
-          <input type="radio" name="billingMode" value="time" onchange="billingModeChanged()">
-          <span><strong>Theo thời gian</strong><br><small>5.000đ mỗi block 30 phút. Nếu còn quyền sử dụng thì không trừ thêm.</small></span>
-        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div class="form-label" style="margin-bottom:0">Hình thức tính phí:</div>
+          <button type="button" class="btn btn-secondary btn-xs" id="btnChangeBillingMode" onclick="openBillingSelectModal(true)" style="padding:3px 10px;font-size:12px">
+            <i class="fa-solid fa-arrows-rotate"></i> Đổi gói
+          </button>
+        </div>
+        <div id="selectedPlanBanner" style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:8px"></div>
+        <input type="hidden" name="billingMode" id="billingModeHidden" value="quantity">
         <div id="timeBlockWrap" style="display:none;margin-top:12px">
-          <label class="form-label" for="blockCount">Số block 30 phút</label>
+          <label class="form-label" for="blockCount">Số block 30 phút muốn gia hạn/thuê thêm</label>
           <input id="blockCount" class="form-input" type="number" min="1" max="48" value="1" oninput="scheduleQuote()">
         </div>
         <div id="billingQuote" style="margin-top:12px;font-size:13px;color:#475569">Nhập danh sách để xem chi phí dự kiến.</div>
@@ -1731,6 +1781,61 @@ function openSubmitModal() {
     toast('⚠️ Phiên SP1S chưa sẵn sàng. Vui lòng đăng nhập lại.');
     return;
   }
+  // Nếu là admin hoặc đã có quyền theo giờ đang active -> mở thẳng submitModal
+  const hasActiveEntitlement = Boolean(currentSession?.entitlement && currentSession.entitlement.id);
+  if (isAdminKey || hasActiveEntitlement) {
+    const defaultMode = hasActiveEntitlement ? 'time' : 'quantity';
+    applyBillingMode(defaultMode);
+    showSubmitModalBox();
+    return;
+  }
+  // Đối với tài khoản thông thường chưa có quyền theo giờ: mở modal chọn gói thanh toán trước
+  openBillingSelectModal(false);
+}
+
+function openBillingSelectModal(fromEdit = false) {
+  if (fromEdit) {
+    closeModal('submitModal');
+  }
+  openModal('billingSelectModal');
+}
+
+function selectBillingModeAndProceed(mode) {
+  closeModal('billingSelectModal');
+  applyBillingMode(mode);
+  showSubmitModalBox();
+}
+
+function applyBillingMode(mode) {
+  const hiddenInput = document.getElementById('billingModeHidden');
+  if (hiddenInput) hiddenInput.value = mode;
+
+  const banner = document.getElementById('selectedPlanBanner');
+  const changeBtn = document.getElementById('btnChangeBillingMode');
+  const hasActiveEntitlement = Boolean(currentSession?.entitlement && currentSession.entitlement.id);
+
+  if (isAdminKey) {
+    if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-crown"></i> Gói Quản trị viên (Miễn phí hoàn toàn)</span>';
+    if (changeBtn) changeBtn.style.display = 'none';
+  } else if (hasActiveEntitlement) {
+    if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-clock"></i> Đang có quyền theo giờ (Miễn phí tới ' + new Date(currentSession.entitlement.expires_at).toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'}) + ')</span>';
+    if (changeBtn) changeBtn.style.display = 'none';
+  } else if (mode === 'time') {
+    if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-stopwatch"></i> Theo thời gian (5.000đ / block 30 phút - không giới hạn acc)</span>';
+    if (changeBtn) changeBtn.style.display = 'inline-flex';
+  } else {
+    if (banner) banner.innerHTML = '<span style="color:var(--secondary)"><i class="fa-solid fa-list-check"></i> Theo số lượng (0,3đ / acc OK - hoàn tiền nick sai)</span>';
+    if (changeBtn) changeBtn.style.display = 'inline-flex';
+  }
+
+  const timeWrap = document.getElementById('timeBlockWrap');
+  if (timeWrap) {
+    timeWrap.style.display = (mode === 'time' && !hasActiveEntitlement && !isAdminKey) ? 'block' : 'none';
+  }
+  scheduleQuote();
+}
+
+function showSubmitModalBox() {
   openModal('submitModal');
   setTimeout(() => {
     const accInput = document.getElementById('accInput');
@@ -1918,13 +2023,9 @@ function importAccountsFile() {
 }
 
 function selectedBillingMode() {
-  return document.querySelector('input[name="billingMode"]:checked')?.value || 'quantity';
-}
-
-function billingModeChanged() {
-  const timeMode = selectedBillingMode() === 'time';
-  document.getElementById('timeBlockWrap').style.display = timeMode ? 'block' : 'none';
-  scheduleQuote();
+  const hidden = document.getElementById('billingModeHidden');
+  if (hidden && hidden.value) return hidden.value;
+  return 'quantity';
 }
 
 function scheduleQuote() {
