@@ -1086,6 +1086,13 @@ table.data-table tbody tr:hover {
   color: #C2410C;
   border: 1px solid #FDBA74;
 }
+.ban-time-details {
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: nowrap;
+}
 .tag-badge.fail {
   background: #FEE2E2;
   color: #B91C1C;
@@ -2416,8 +2423,14 @@ function renderFilteredRows() {
     const psLower = String(row.player_status || '').toLowerCase();
     if (psLower.includes('khóa') || psLower.includes('ban')) {
       playerStatusHtml = '<span class="tag-badge locked"><i class="fa-solid fa-lock"></i> ' + esc(row.player_status) + '</span>';
+      const banTimes = [];
+      if (row.banTime) banTimes.push('<div>Ban: ' + esc(row.banTime) + '</div>');
+      if (row.unbanTime) banTimes.push('<div>Mở ban: ' + esc(row.unbanTime) + '</div>');
+      if (banTimes.length) playerStatusHtml += '<div class="ban-time-details">' + banTimes.join('') + '</div>';
     } else if (psLower.includes('chưa tạo nhân vật') || psLower === 'ctnv' || cat === 'CTNV') {
       playerStatusHtml = '<span class="tag-badge ctnv"><i class="fa-solid fa-user-plus"></i> CTNV</span>';
+    } else if (psLower.trim() === 'bình thường') {
+      playerStatusHtml = '<span class="tag-badge ok"><i class="fa-solid fa-circle-check"></i> ' + esc(row.player_status) + '</span>';
     }
 
     h += '<tr>' +

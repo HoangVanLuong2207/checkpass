@@ -595,6 +595,61 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertNotEqual(second["job_id"], first["job_id"])
 
+    def test_two_jobs_can_be_stopped_at_the_same_time(self) -> None:
+        self.store.block_once = False
+        _, first = self.post("/api/jobs", {"text": "user1|pass1\nuser2|pass2"}, token="key-a")
+        _, second = self.post("/api/jobs", {"text": "user3|pass3\nuser4|pass4"}, token="key-b")
+
+        original = MasterHandler._finalize_unresolved_accounts
+        counter_lock = threading.Lock()
+        active = 0
+        max_active = 0
+
+        def measured_finalize(handler, job_id: int, now: float) -> int:
+            nonlocal active, max_active
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                # Keep the first finalization open long enough for the other
+                # request thread to reach the server.
+                time.sleep(0.1)
+                return original(handler, job_id, now)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        responses: list[tuple[int, dict]] = []
+        errors: list[Exception] = []
+
+        def stop(job_id: int, token: str) -> None:
+            try:
+                responses.append(self.post(f"/api/jobs/{job_id}/stop", {}, token=token))
+            except Exception as exc:  # pragma: no cover - surfaced below
+                errors.append(exc)
+
+        with mock.patch.object(MasterHandler, "_finalize_unresolved_accounts", measured_finalize):
+            threads = [
+                threading.Thread(target=stop, args=(first["job_id"], "key-a")),
+                threading.Thread(target=stop, args=(second["job_id"], "key-b")),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+
+        self.assertFalse(errors)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(sorted(status for status, _ in responses), [200, 200])
+        self.assertEqual(max_active, 1)
+        for job_id in (first["job_id"], second["job_id"]):
+            self.assertEqual(self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))[0], "done")
+            self.assertEqual(
+                self.inner.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status!='done'", (job_id,))[0],
+                0,
+            )
+            self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))[0], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

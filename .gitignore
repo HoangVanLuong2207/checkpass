@@ -1,6 +1,10 @@
 __pycache__/
 *.pyc
 .env
+.garena_web_profile/
+.garena_profiles/
+.garena_manual_profile/
+.garena_cookie_exports/
 
 # File chua mat khau - TUYET DOI khong push
 accounts_probe.txt

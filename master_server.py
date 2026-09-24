@@ -2218,24 +2218,61 @@ class MasterHandler(BaseHTTPRequestHandler):
     def _handle_stop_job(self, job_id: int, auth: dict[str, Any]) -> None:
         """Finish a job, marking every unresolved account as uncheckable."""
 
-        allowed, job = self._check_job_access(job_id, auth)
-        if job is None:
-            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
-            return
-        if not allowed:
-            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền dừng job này"})
-            return
-        if job[4] != "open":
-            self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": job[4], "already_stopped": True})
-            return
-        now = _now()
-        marked_uncheckable = self._finalize_unresolved_accounts(job_id, now)
-        self.server.store.batch([
-            {"sql": "UPDATE chunks SET status='done', lease_until=NULL, reported_at=? WHERE job_id=? AND status IN ('pending','claimed')", "args": [now, job_id]},
-            {"sql": "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='open'", "args": [now, job_id]},
-        ])
-        _try_prune_completed_jobs(self.server.store)
-        self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": "done", "marked_uncheckable": marked_uncheckable})
+        # Stopping can create hundreds of terminal result rows.  Serialize the
+        # complete operation instead of allowing two HTTP handler threads to
+        # interleave those large batches on the same database connection.
+        with self.server.stop_lock:
+            allowed, job = self._check_job_access(job_id, auth)
+            if job is None:
+                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+                return
+            if not allowed:
+                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền dừng job này"})
+                return
+            if job[4] != "open":
+                self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": job[4], "already_stopped": True})
+                return
+
+            store = self.server.store
+            now = _now()
+            # Publish the stop request before generating placeholder results.
+            # Claims/reports and satellite heartbeats all treat any non-open
+            # state as stopped, so no new work starts while finalization runs.
+            changed = store.exec_with_changes(
+                "UPDATE jobs SET status='stopping' WHERE id=? AND status='open'",
+                (job_id,),
+            )
+            if changed == 0:
+                current = store.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
+                status = current[0] if current else "done"
+                # Some libSQL client versions do not expose affected_rows and
+                # therefore report zero even though the UPDATE succeeded.
+                if status != "stopping":
+                    self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": status, "already_stopped": True})
+                    return
+
+            try:
+                marked_uncheckable = self._finalize_unresolved_accounts(job_id, now)
+                store.batch([
+                    {"sql": "UPDATE chunks SET status='done', lease_until=NULL, reported_at=? WHERE job_id=? AND status IN ('pending','claimed')", "args": [now, job_id]},
+                    {"sql": "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='stopping'", "args": [now, job_id]},
+                ])
+            except Exception as exc:
+                # A failed finalization must remain retryable.  Placeholder
+                # inserts are UPSERTs, so retrying the stop is idempotent.
+                store.exec(
+                    "UPDATE jobs SET status='open' WHERE id=? AND status='stopping'",
+                    (job_id,),
+                )
+                print(f"[master] dừng job {job_id} thất bại: {exc}", flush=True)
+                self._json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"ok": False, "error": "Không thể hoàn tất yêu cầu dừng job; vui lòng thử lại."},
+                )
+                return
+
+            _try_prune_completed_jobs(store)
+            self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": "done", "marked_uncheckable": marked_uncheckable})
 
     def _finalize_unresolved_accounts(self, job_id: int, now: float) -> int:
         """Persist a terminal result for accounts in chunks interrupted by Stop."""
@@ -2820,7 +2857,19 @@ class MasterHandler(BaseHTTPRequestHandler):
                 is_ctnv = level.casefold() == "ctnv" or player_status.casefold() == "chưa tạo nhân vật"
                 name = "CTNV" if is_ctnv else str(row.get("name") or "").strip()
                 status = player_status or str(row.get("status") or "").strip()
-                lines.append(" || ".join((str(row.get("_export_credential") or row.get("account") or "").strip(), str(row.get("uid") or "").strip(), name, level, status)))
+                values = [
+                    str(row.get("_export_credential") or row.get("account") or "").strip(),
+                    str(row.get("uid") or "").strip(),
+                    name,
+                    level,
+                    status,
+                ]
+                if player_status == "Bị khóa":
+                    values.extend((
+                        f"Ban: {str(row.get('banTime') or '').strip()}",
+                        f"Mở ban: {str(row.get('unbanTime') or '').strip()}",
+                    ))
+                lines.append(" || ".join(values))
         body = "\n".join(lines) + ("\n" if lines else "")
         data = body.encode("utf-8-sig")
         self.send_response(HTTPStatus.OK)
@@ -2907,6 +2956,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             workbook = openpyxl.Workbook()
             headers = ["STT", "Tài khoản", "Kết quả check", "UID", "Tên", "Cấp", "Ngày tạo", "Trạng thái tài khoản"]
             fields = ["stt", "account", "status", "uid", "name", "level", "registerDate", "player_status"]
+            widths = [8, 28, 16, 16, 28, 10, 16, 24]
             fills = {
                 "Đạt": "238636", "Không đạt": "9E6A03", "CTNV": "8250DF",
                 "Bị khóa": "C2410C", "Không thể log": "DA3633", "Chưa thể check": "D29922",
@@ -2915,13 +2965,20 @@ class MasterHandler(BaseHTTPRequestHandler):
                 worksheet = workbook.active if index == 0 else workbook.create_sheet()
                 worksheet.title = f"Đạt từ LV {min_level}" if sheet_name == "Đạt" else sheet_name
                 fill = PatternFill(start_color=fills[sheet_name], end_color=fills[sheet_name], fill_type="solid")
-                for column, label in enumerate(headers, 1):
+                sheet_headers = list(headers)
+                sheet_fields = list(fields)
+                sheet_widths = list(widths)
+                if sheet_name == "Bị khóa":
+                    sheet_headers.extend(("Thời gian ban", "Thời gian mở ban"))
+                    sheet_fields.extend(("banTime", "unbanTime"))
+                    sheet_widths.extend((28, 28))
+                for column, label in enumerate(sheet_headers, 1):
                     cell = worksheet.cell(row=1, column=column, value=label)
                     cell.font = Font(bold=True, color="FFFFFF")
                     cell.fill = fill
                     cell.alignment = Alignment(horizontal="center")
                 for row_index, row in enumerate(sheet_rows, 2):
-                    for column, field in enumerate(fields, 1):
+                    for column, field in enumerate(sheet_fields, 1):
                         value = str(
                             row.get("_export_credential") or row.get(field, "") or ""
                         ) if field == "account" else str(row.get(field, "") or "")
@@ -2933,8 +2990,9 @@ class MasterHandler(BaseHTTPRequestHandler):
                         value = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", value)
                         worksheet.cell(row=row_index, column=column, value=value)
                 worksheet.freeze_panes = "A2"
-                worksheet.auto_filter.ref = f"A1:H{max(1, len(sheet_rows) + 1)}"
-                for column, width in enumerate((8, 28, 16, 16, 28, 10, 16, 24), 1):
+                last_column = openpyxl.utils.get_column_letter(len(sheet_headers))
+                worksheet.auto_filter.ref = f"A1:{last_column}{max(1, len(sheet_rows) + 1)}"
+                for column, width in enumerate(sheet_widths, 1):
                     worksheet.column_dimensions[openpyxl.utils.get_column_letter(column)].width = width
 
             output = io.BytesIO()
@@ -2964,6 +3022,7 @@ class CoordinatorServer(ThreadingHTTPServer):
         self.master_token = master_token
         self.claim_lock = threading.Lock()
         self.job_creation_lock = threading.Lock()
+        self.stop_lock = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
