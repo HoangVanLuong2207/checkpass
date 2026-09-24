@@ -1426,10 +1426,10 @@ table.data-table tbody tr:hover {
     </div>
 
     <div class="navbar-actions">
-      <div class="key-pill" id="ownerBadgeWrap" onclick="changeKey()" title="Bấm để đổi License Key">
+      <div class="key-pill" id="ownerBadgeWrap" title="Tài khoản và số dư SP1S">
         <span class="status-dot" id="keyDot"></span>
-        <i class="fa-solid fa-key" style="color:#EA580C"></i>
-        <span id="ownerBadgeText">Đang tải key...</span>
+        <i class="fa-solid fa-user" style="color:#EA580C"></i>
+        <span id="ownerBadgeText">Đang tải tài khoản...</span>
       </div>
 
       <button class="btn btn-primary btn-sm" id="createJobBtn" onclick="openSubmitModal()">
@@ -1444,8 +1444,8 @@ table.data-table tbody tr:hover {
         <i class="fa-solid fa-sliders"></i> Quản Trị
       </button>
 
-      <button class="btn btn-secondary btn-sm" onclick="changeKey()" title="Cài đặt License Key">
-        <i class="fa-solid fa-shield-halved"></i> Đổi Key
+      <button class="btn btn-secondary btn-sm" id="sessionActionBtn" onclick="sessionAction()" title="Tài khoản SP1S">
+        <i class="fa-solid fa-right-to-bracket"></i> Đăng nhập
       </button>
     </div>
   </div>
@@ -1520,7 +1520,7 @@ table.data-table tbody tr:hover {
 
       <div class="jobs-search-bar">
         <i class="fa-solid fa-magnifying-glass jobs-search-icon"></i>
-        <input type="text" id="jobsSearchInput" class="jobs-search-input" placeholder="Tìm theo Job ID hoặc Key..." oninput="filterJobsList()">
+        <input type="text" id="jobsSearchInput" class="jobs-search-input" placeholder="Tìm theo Job ID hoặc tài khoản..." oninput="filterJobsList()">
       </div>
 
       <div id="jobsList" class="jobs-list">
@@ -1597,37 +1597,6 @@ table.data-table tbody tr:hover {
   </div>
 </div>
 
-<!-- Modal License Key -->
-<div class="modal-backdrop" id="keyModal" onclick="if(event.target===this)closeModal('keyModal')">
-  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="keyModalTitle">
-    <div class="modal-head">
-      <div>
-        <h2 id="keyModalTitle"><i class="fa-solid fa-shield-halved" style="color:#EA580C"></i> Cài Đặt License Key</h2>
-        <p>Nhập license key được admin cấp để truy cập các jobs của bạn</p>
-      </div>
-      <button class="icon-btn" title="Đóng" onclick="closeModal('keyModal')"><i class="fa-solid fa-xmark"></i></button>
-    </div>
-    <div class="modal-body">
-      <div class="form-group">
-        <label class="form-label" for="keyInput">Mã License Key / Master Token</label>
-        <div style="position:relative">
-          <input type="password" id="keyInput" class="form-input" placeholder="Nhập key vào đây..." onkeydown="if(event.key==='Enter')saveKey()">
-          <button type="button" class="copy-btn" style="position:absolute;right:12px;top:50%;transform:translateY(-50%)" onclick="toggleKeyVisibility()" title="Ẩn/Hiện key">
-            <i class="fa-solid fa-eye" id="toggleKeyIcon"></i>
-          </button>
-        </div>
-      </div>
-      <div id="keyStatus" style="font-size:13px;padding:8px 12px;border-radius:8px;display:none"></div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary btn-sm" onclick="closeModal('keyModal')">Hủy</button>
-      <button class="btn btn-primary btn-sm" id="saveKeyBtn" onclick="saveKey()">
-        <i class="fa-solid fa-check"></i> Lưu &amp; Kiểm Tra
-      </button>
-    </div>
-  </div>
-</div>
-
 <!-- Modal Tạo Job -->
 <div class="modal-backdrop" id="submitModal" onclick="if(event.target===this)closeModal('submitModal')">
   <div class="modal-box modal-wide" role="dialog" aria-modal="true" aria-labelledby="submitModalTitle">
@@ -1651,6 +1620,23 @@ table.data-table tbody tr:hover {
       </div>
 
       <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
+
+      <div style="margin-top:16px;padding:14px;border:1px solid #fed7aa;border-radius:12px;background:#fffaf5">
+        <div class="form-label" style="margin-bottom:10px">Hình thức tính phí</div>
+        <label style="display:flex;gap:9px;align-items:flex-start;margin-bottom:10px;cursor:pointer">
+          <input type="radio" name="billingMode" value="quantity" checked onchange="billingModeChanged()">
+          <span><strong>Theo số lượng</strong><br><small>Tạm giữ tối đa 0,3đ/tài khoản; chỉ trừ theo số tài khoản OK khi job hoàn tất.</small></span>
+        </label>
+        <label style="display:flex;gap:9px;align-items:flex-start;cursor:pointer">
+          <input type="radio" name="billingMode" value="time" onchange="billingModeChanged()">
+          <span><strong>Theo thời gian</strong><br><small>5.000đ mỗi block 30 phút. Nếu còn quyền sử dụng thì không trừ thêm.</small></span>
+        </label>
+        <div id="timeBlockWrap" style="display:none;margin-top:12px">
+          <label class="form-label" for="blockCount">Số block 30 phút</label>
+          <input id="blockCount" class="form-input" type="number" min="1" max="48" value="1" oninput="scheduleQuote()">
+        </div>
+        <div id="billingQuote" style="margin-top:12px;font-size:13px;color:#475569">Nhập danh sách để xem chi phí dự kiến.</div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary btn-sm" style="margin-right:auto" onclick="document.getElementById('accFile').click()">
@@ -1668,15 +1654,22 @@ table.data-table tbody tr:hover {
 <div id="toast"><i class="fa-solid fa-circle-info"></i> <span id="toastText"></span></div>
 
 <script>
-const keyFromUrl = new URLSearchParams(window.location.search).get('key');
-let TOKEN = keyFromUrl || localStorage.getItem('licenseKey') || localStorage.getItem('masterToken') || '';
-if (keyFromUrl) {
-  localStorage.setItem('licenseKey', TOKEN);
+const initialParams = new URLSearchParams(window.location.search);
+const keyFromUrl = initialParams.get('key');
+const loginError = initialParams.get('login_error');
+// Normal users authenticate with the HttpOnly SP1S session cookie. A token in
+// the URL is retained only for the separate master-admin workflow.
+let TOKEN = keyFromUrl || '';
+let currentSession = null;
+let quoteTimer = null;
+if (keyFromUrl || loginError || initialParams.get('login')) {
   history.replaceState(null, '', window.location.pathname);
 }
 
 function getHeaders() {
-  return { 'Authorization': 'Bearer ' + TOKEN, 'Content-Type': 'application/json' };
+  const headers = { 'Content-Type': 'application/json' };
+  if (TOKEN) headers.Authorization = 'Bearer ' + TOKEN;
+  return headers;
 }
 
 let currentJobId = null;
@@ -1704,7 +1697,7 @@ let detailRowsLoadedAt = 0;
 function toast(msg, ms = 3200, type = 'info') {
   const t = document.getElementById('toast');
   const txt = document.getElementById('toastText');
-  txt.innerHTML = msg;
+  txt.textContent = msg;
   t.style.display = 'inline-flex';
   setTimeout(() => { t.style.display = 'none'; }, ms);
 }
@@ -1724,21 +1717,14 @@ function closeModal(id) {
   }
 }
 
-function openKeyModal() {
-  const input = document.getElementById('keyInput');
-  if (input) input.value = TOKEN;
-  openModal('keyModal');
-  setTimeout(() => { if (input) { input.focus(); input.select(); } }, 60);
-}
-
 function openSubmitModal() {
-  if (!TOKEN) {
-    toast('⚠️ Vui lòng cấu hình License Key trước khi tạo job');
-    openKeyModal();
+  if (!currentSession && !TOKEN) {
+    toast('⚠️ Vui lòng đăng nhập tài khoản SP1S trước khi tạo job');
+    window.location.href = '/auth/login';
     return;
   }
   if (!canCreateJobs) {
-    toast('⚠️ Key đã hết hạn hoặc không còn hiệu lực. Bạn vẫn có thể xem lịch sử job nhưng không thể tạo job mới.');
+    toast('⚠️ Phiên SP1S chưa sẵn sàng. Vui lòng đăng nhập lại.');
     return;
   }
   openModal('submitModal');
@@ -1746,19 +1732,6 @@ function openSubmitModal() {
     const accInput = document.getElementById('accInput');
     if (accInput) { accInput.focus(); updateAccountCounter(); }
   }, 60);
-}
-
-function toggleKeyVisibility() {
-  const inp = document.getElementById('keyInput');
-  const ic = document.getElementById('toggleKeyIcon');
-  if (!inp) return;
-  if (inp.type === 'password') {
-    inp.type = 'text';
-    ic.className = 'fa-solid fa-eye-slash';
-  } else {
-    inp.type = 'password';
-    ic.className = 'fa-solid fa-eye';
-  }
 }
 
 function updateAccountCounter() {
@@ -1777,6 +1750,7 @@ function updateAccountCounter() {
     );
     el.style.color = overLimit ? 'var(--danger)' : '';
   }
+  scheduleQuote();
 }
 
 document.addEventListener('keydown', event => {
@@ -1786,7 +1760,7 @@ document.addEventListener('keydown', event => {
 });
 
 async function api(path, opt = {}) {
-  const r = await fetch(path, { headers: getHeaders(), ...opt });
+  const r = await fetch(path, { credentials: 'same-origin', headers: getHeaders(), ...opt });
   const text = await r.text();
   let j;
   try {
@@ -1795,30 +1769,31 @@ async function api(path, opt = {}) {
     j = { ok: false, error: 'Lỗi parse JSON: ' + (text.slice(0, 200) || 'empty') + ' (status ' + r.status + ')' };
   }
   if (r.status === 401) {
-    toast('❌ ' + (j.error || 'Key không hợp lệ hoặc đã hết hạn'));
+    toast('❌ ' + (j.error || 'Phiên đăng nhập SP1S đã hết hạn'));
   } else if (!r.ok && !j.error) {
     j.error = 'Lỗi ' + r.status + ': ' + text.slice(0, 200);
   }
   return j;
 }
 
-function previewKey(k) {
-  if (!k) return '';
-  if (k.length <= 8) return k.slice(0, 2) + '***' + k.slice(-1);
-  return k.slice(0, 4) + '***' + k.slice(-2);
-}
-
 function updateOwnerBadge() {
   const txt = document.getElementById('ownerBadgeText');
   const dot = document.getElementById('keyDot');
+  const action = document.getElementById('sessionActionBtn');
   if (txt) {
-    txt.textContent = TOKEN ? ('Key: ' + previewKey(TOKEN)) : 'Chưa có key';
+    if (currentSession && currentSession.user) {
+      const balance = Number(currentSession.available_balance ?? currentSession.balance ?? 0)
+        .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
+      txt.textContent = (currentSession.user.name || currentSession.user.email) + ' · ' + balance + 'đ khả dụng';
+    } else if (TOKEN) txt.textContent = 'Quản trị viên';
+    else txt.textContent = 'Chưa đăng nhập';
   }
   if (dot) {
-    dot.className = TOKEN ? 'status-dot' : 'status-dot empty';
+    dot.className = (currentSession || TOKEN) ? 'status-dot' : 'status-dot empty';
   }
-  const inp = document.getElementById('keyInput');
-  if (inp && !inp.value) inp.value = TOKEN;
+  if (action) action.innerHTML = currentSession
+    ? '<i class="fa-solid fa-right-from-bracket"></i> Đăng xuất'
+    : '<i class="fa-solid fa-right-to-bracket"></i> Đăng nhập';
 }
 
 function setClearAllButton(visible) {
@@ -1833,7 +1808,7 @@ function setCreateJobAvailability(allowed) {
   const btn = document.getElementById('createJobBtn');
   if (!btn) return;
   btn.disabled = !canCreateJobs;
-  btn.title = canCreateJobs ? '' : 'Key hết hạn chỉ được xem lịch sử job';
+  btn.title = canCreateJobs ? '' : 'Hãy đăng nhập tài khoản SP1S để tạo job';
 }
 
 function openAdminPage() {
@@ -1867,103 +1842,46 @@ async function loadPublicNotice() {
   }
 }
 
-function changeKey() {
-  openKeyModal();
+async function loadSession(loadJobsAfter = true) {
+  try {
+    const response = await fetch('/api/session', { credentials: 'same-origin', headers: getHeaders(), cache: 'no-store' });
+    const data = await response.json();
+    if (!response.ok || !data.authenticated) throw new Error(data.error || 'Chưa đăng nhập');
+    currentSession = data;
+    isAdminKey = data.is_admin === true;
+    canCreateJobs = true;
+    const configuredLimit = Number(data.max_accounts_per_job);
+    maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
+    setCreateJobAvailability(true);
+    setClearAllButton(isAdminKey);
+    updateOwnerBadge();
+    updateAccountCounter();
+    if (loadJobsAfter) await loadJobs();
+    return true;
+  } catch (_) {
+    currentSession = null;
+    setCreateJobAvailability(false);
+    setClearAllButton(false);
+    updateOwnerBadge();
+    return false;
+  }
 }
 
-async function saveKey() {
-  const inp = document.getElementById('keyInput');
-  const btn = document.getElementById('saveKeyBtn');
-  const k = (inp ? inp.value.trim() : '');
-  if (!k) {
-    toast('⚠️ Vui lòng nhập key!');
+async function sessionAction() {
+  if (!currentSession) {
+    window.location.href = '/auth/login';
     return;
   }
-  TOKEN = k;
-  setClearAllButton(false);
-  btn.disabled = true;
-  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin-fast"></i> Đang kiểm tra...';
-  const valid = await checkKey();
-  btn.disabled = false;
-  btn.innerHTML = '<i class="fa-solid fa-check"></i> Lưu &amp; Kiểm Tra';
-  if (valid) {
-    localStorage.setItem('licenseKey', TOKEN);
-    updateOwnerBadge();
-    closeModal('keyModal');
-    loadJobs();
-    toast('✅ Đã lưu và xác thực key thành công!');
-  }
-}
-
-async function checkKey() {
-  const st = document.getElementById('keyStatus');
-  if (!st) return false;
-  if (!TOKEN) {
-    setClearAllButton(false);
-    st.style.display = 'block';
-    st.style.background = '#FEE2E2';
-    st.style.color = '#B91C1C';
-    st.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Chưa nhập License Key';
-    return false;
-  }
-  st.style.display = 'block';
-  st.style.background = '#EFF6FF';
-  st.style.color = '#1D4ED8';
-  st.innerHTML = '<i class="fa-solid fa-spinner fa-spin-fast"></i> Đang xác thực với máy chủ...';
-  try {
-    const r = await fetch('/api/verify?token=' + encodeURIComponent(TOKEN), { headers: getHeaders() });
-    const j = await r.json();
-    if (j.valid || j.ok) {
-      setCreateJobAvailability(j.can_create_job !== false);
-      isAdminKey = j.is_admin === true;
-      const configuredLimit = Number(j.max_accounts_per_job);
-      maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
-      setClearAllButton(isAdminKey);
-      updateAccountCounter();
-      st.style.background = '#ECFDF5';
-      st.style.color = '#047857';
-      const accountLimitText = isAdminKey
-        ? ' · <strong>Không giới hạn tài khoản/job</strong>'
-        : (maxAccountsPerJob ? ' · Tối đa ' + formatNumber(maxAccountsPerJob) + ' tài khoản/job' : '');
-      st.innerHTML = '<i class="fa-solid fa-circle-check"></i> Key hợp lệ (' + previewKey(TOKEN) + ')' + (isAdminKey ? ' · <strong>Quyền Admin</strong>' : '') + accountLimitText + (isAdminKey ? ' · Không áp dụng giới hạn 1 job/key' : ' · 1 job đang chạy/key');
-      return true;
-    }
-    if (j.history_access) {
-      isAdminKey = false;
-      maxAccountsPerJob = null;
-      setClearAllButton(false);
-      setCreateJobAvailability(false);
-      updateAccountCounter();
-      st.style.background = '#FEF3C7';
-      st.style.color = '#B45309';
-      st.innerHTML = '<i class="fa-solid fa-clock-rotate-left"></i> Key đã hết hạn hoặc không còn hiệu lực. Chỉ có thể xem lịch sử job, không thể tạo job mới.';
-      return true;
-    }
-    isAdminKey = false;
-    setCreateJobAvailability(false);
-    maxAccountsPerJob = null;
-    updateAccountCounter();
-    setClearAllButton(false);
-    st.style.background = '#FEE2E2';
-    st.style.color = '#B91C1C';
-    st.innerHTML = '<i class="fa-solid fa-circle-xmark"></i> Key không hợp lệ: ' + (j.error || 'không rõ nguyên nhân');
-    return false;
-  } catch(e) {
-    isAdminKey = false;
-    setCreateJobAvailability(false);
-    maxAccountsPerJob = null;
-    updateAccountCounter();
-    setClearAllButton(false);
-    st.style.background = '#FEF3C7';
-    st.style.color = '#B45309';
-    st.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i> Không thể kiểm tra: ' + e.message;
-    return false;
-  }
+  await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin', headers: getHeaders(), body: '{}' });
+  currentSession = null;
+  updateOwnerBadge();
+  setCreateJobAvailability(false);
+  window.location.reload();
 }
 
 loadPublicNotice();
 updateOwnerBadge();
-if (TOKEN) checkKey();
+if (loginError) setTimeout(() => toast('❌ ' + loginError, 6000), 0);
 
 function importAccountsFile() {
   const input = document.getElementById('accFile');
@@ -1989,6 +1907,61 @@ function importAccountsFile() {
   reader.readAsText(file);
 }
 
+function selectedBillingMode() {
+  return document.querySelector('input[name="billingMode"]:checked')?.value || 'quantity';
+}
+
+function billingModeChanged() {
+  const timeMode = selectedBillingMode() === 'time';
+  document.getElementById('timeBlockWrap').style.display = timeMode ? 'block' : 'none';
+  scheduleQuote();
+}
+
+function scheduleQuote() {
+  clearTimeout(quoteTimer);
+  quoteTimer = setTimeout(refreshQuote, 250);
+}
+
+async function refreshQuote() {
+  const target = document.getElementById('billingQuote');
+  if (!target || (!currentSession && !TOKEN)) return;
+  const mode = selectedBillingMode();
+  const text = (document.getElementById('accInput')?.value || '').trim();
+  const submittedCount = text ? text.split(/\r?\n/).filter(line => line.trim() && !line.trim().startsWith('#')).length : 0;
+  const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
+  if (mode === 'quantity' && submittedCount < 1) {
+    target.textContent = 'Nhập danh sách để xem chi phí dự kiến.';
+    return;
+  }
+  target.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tính chi phí...';
+  try {
+    const data = await api('/api/quote', {
+      method: 'POST',
+      body: JSON.stringify(mode === 'time'
+        ? { mode, block_count: blockCount }
+        : { mode, submitted_count: submittedCount })
+    });
+    if (!data.ok) throw new Error(data.error || 'Không tính được chi phí');
+    const amount = Number(data.amount || 0).toLocaleString('vi-VN', { maximumFractionDigits: 1 });
+    const available = Number(data.available_balance || currentSession?.available_balance || 0)
+      .toLocaleString('vi-VN', { maximumFractionDigits: 1 });
+    let message = data.covered_by_time
+      ? '<strong style="color:#047857">Đang có quyền theo giờ: không trừ thêm tiền.</strong>'
+      : '<strong>Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
+    if (mode === 'quantity') {
+      message += '<br><small>Đây là mức tạm giữ tối đa; số tiền thực tế = số OK × 0,3đ.</small>';
+      if (data.entitlement) message += '<br><strong style="color:#b45309">Bạn đang có quyền theo giờ; nên chọn Theo thời gian để tối ưu chi phí.</strong>';
+    }
+    if (!data.affordable) message += '<br><strong style="color:#b91c1c">Số dư không đủ để chạy.</strong>';
+    target.innerHTML = message;
+    target.dataset.affordable = data.affordable ? '1' : '0';
+    target.dataset.hasEntitlement = data.entitlement ? '1' : '0';
+  } catch (error) {
+    target.textContent = error.message;
+    target.dataset.affordable = '0';
+  }
+}
+
 async function sendJob() {
   const text = document.getElementById('accInput').value.trim();
   if (!text) {
@@ -2004,12 +1977,39 @@ async function sendJob() {
     return;
   }
   const btn = document.getElementById('btnSend');
+  const billingMode = selectedBillingMode();
+  const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
+  const quote = document.getElementById('billingQuote');
+  if (quote?.dataset.affordable === '0') {
+    toast('❌ Số dư SP1S không đủ để chạy job này');
+    return;
+  }
+  let confirmQuantityWhileTimed = false;
+  if (billingMode === 'quantity' && quote?.dataset.hasEntitlement === '1') {
+    confirmQuantityWhileTimed = confirm('Tài khoản đang có quyền chạy theo giờ. Bạn vẫn muốn trả phí theo số lượng?');
+    if (!confirmQuantityWhileTimed) return;
+  }
+  const hasTimeAccess = quote?.dataset.hasEntitlement === '1' || Boolean(currentSession?.entitlement);
+  if (billingMode === 'time' && !hasTimeAccess) {
+    const rentalCost = blockCount * 5000;
+    if (!confirm('Tài khoản chưa có quyền theo giờ. Thuê ' + (blockCount * 30) +
+      ' phút với giá ' + formatNumber(rentalCost) + 'đ và chạy job này?')) return;
+  }
   btn.disabled = true;
   btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin-fast"></i> Đang gửi...';
   try {
-    const d = await api('/api/jobs', { method: 'POST', body: JSON.stringify({ text }) });
+    const d = await api('/api/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        text,
+        billing_mode: billingMode,
+        block_count: blockCount,
+        confirm_quantity_while_timed: confirmQuantityWhileTimed,
+      })
+    });
     if (d.ok) {
       toast('🚀 Đã tạo Job #' + d.job_id + ' (' + formatNumber(d.total) + ' acc) thành công!');
+      await loadSession(false);
       document.getElementById('accInput').value = '';
       updateAccountCounter();
       closeModal('submitModal');
@@ -2074,7 +2074,7 @@ function esc(value) {
 function copyToClipboard(text, btnElement) {
   if (!text) return;
   navigator.clipboard.writeText(text).then(() => {
-    toast('📋 Đã sao chép: <b>' + esc(text) + '</b>', 1800);
+    toast('📋 Đã sao chép: ' + text, 1800);
     if (btnElement) {
       const orig = btnElement.innerHTML;
       btnElement.innerHTML = '<i class="fa-solid fa-check" style="color:#059669"></i>';
@@ -2139,7 +2139,15 @@ function renderJobs(query = '') {
       : (isStopping
         ? '<span class="badge badge-running"><i class="fa-solid fa-stop fa-beat"></i> Đang dừng</span>'
         : '<span class="badge badge-running"><i class="fa-solid fa-bolt fa-spin-fast"></i> Đang chạy</span>');
-    const owner = j.owner_preview ? (' · <i class="fa-solid fa-key" style="font-size:10px"></i> ' + esc(j.owner_preview)) : '';
+    const owner = j.owner_preview ? (' · <i class="fa-solid fa-user" style="font-size:10px"></i> ' + esc(j.owner_preview)) : '';
+    let billing = '';
+    if (j.billing_mode === 'quantity') {
+      billing = j.billing_state === 'settled'
+        ? ' · Phí ' + formatNumber(j.final_amount) + 'đ'
+        : ' · <span style="color:#b45309">Đang quyết toán</span>';
+    } else if (j.billing_mode === 'time' && j.access_until) {
+      billing = ' · Quyền đến ' + esc(formatDate(j.access_until));
+    }
     const activeClass = currentJobId === id ? 'active' : '';
 
     return '<div class="job-item ' + activeClass + '" role="button" tabindex="0" onclick="viewJob(' + id + ')">' +
@@ -2148,7 +2156,7 @@ function renderJobs(query = '') {
         status +
       '</div>' +
       '<div class="job-meta">' +
-        '<span><i class="fa-regular fa-calendar"></i> ' + esc(formatDate(j.created_at)) + owner + '</span>' +
+        '<span><i class="fa-regular fa-calendar"></i> ' + esc(formatDate(j.created_at)) + owner + billing + '</span>' +
         '<span><i class="fa-regular fa-clock"></i> ' + jobDurationHtml(j) + '</span>' +
       '</div>' +
       '<div class="progress-container">' +
@@ -2169,7 +2177,7 @@ function renderJobs(query = '') {
 }
 
 async function loadJobs() {
-  if (!TOKEN) return;
+  if (!TOKEN && !currentSession) return;
   if (jobsLoading) return;
   jobsLoading = true;
   const icon = document.getElementById('refreshJobsIcon');
@@ -2493,13 +2501,23 @@ async function refreshDetail(forceRows = true) {
         ? '<span class="badge badge-running"><i class="fa-solid fa-stop fa-beat"></i> Đang dừng</span>'
         : '<span class="badge badge-done"><i class="fa-solid fa-check"></i> Hoàn tất</span>');
 
-    document.getElementById('detailOwner').innerHTML = s.owner_preview ? ('<i class="fa-solid fa-key" style="color:#EA580C"></i> Key ' + esc(s.owner_preview)) : '';
+    document.getElementById('detailOwner').innerHTML = s.owner_preview ? ('<i class="fa-solid fa-user" style="color:#EA580C"></i> ' + esc(s.owner_preview)) : '';
 
     const dur = document.getElementById('detailDuration');
     dur.dataset.start = Number(s.created_at || 0);
     dur.dataset.end = Number(s.finished_at || 0);
     dur.textContent = formatJobDuration(dur.dataset.start, dur.dataset.end);
 
+    let billingDetail = '';
+    if (s.billing_mode === 'quantity') {
+      billingDetail = '<div style="margin-top:10px;font-size:13px">Tính theo số lượng · ' +
+        (s.billing_state === 'settled'
+          ? '<strong>Đã quyết toán ' + formatNumber(s.final_amount) + 'đ</strong>'
+          : '<strong style="color:#b45309">Đang chờ SP1S quyết toán</strong>') + '</div>';
+    } else if (s.billing_mode === 'time') {
+      billingDetail = '<div style="margin-top:10px;font-size:13px">Tính theo thời gian · Quyền đến <strong>' +
+        esc(formatDate(s.access_until)) + '</strong></div>';
+    }
     document.getElementById('detailProgress').innerHTML =
       '<div class="progress-label" style="margin-bottom:6px">' +
         '<span>Tiến độ xử lý: <strong>' + formatNumber(processed) + ' / ' + formatNumber(total) + '</strong> tài khoản</span>' +
@@ -2507,7 +2525,7 @@ async function refreshDetail(forceRows = true) {
       '</div>' +
       '<div class="progress-track" style="height:10px">' +
         '<div class="progress-fill" style="width:' + percent + '%"></div>' +
-      '</div>';
+      '</div>' + billingDetail;
 
     document.getElementById('detailStats').innerHTML =
       '<div class="stat-box blue"><div class="num">' + formatNumber(total) + '</div><div class="lbl">Tổng tài khoản</div></div>' +
@@ -2557,7 +2575,8 @@ function goDetailPage(page) {
 
 function exportTxt() {
   if (currentJobId) {
-    window.open('/api/jobs/' + currentJobId + '/export.txt?token=' + encodeURIComponent(TOKEN));
+    const query = TOKEN ? ('?token=' + encodeURIComponent(TOKEN)) : '';
+    window.open('/api/jobs/' + currentJobId + '/export.txt' + query);
   }
 }
 
@@ -2569,7 +2588,8 @@ function exportXlsx() {
     toast('⚠️ Level tối thiểu phải từ 1 đến 1000');
     return;
   }
-  window.open('/api/jobs/' + currentJobId + '/export.xlsx?min_level=' + minLevel + '&token=' + encodeURIComponent(TOKEN));
+  const tokenPart = TOKEN ? ('&token=' + encodeURIComponent(TOKEN)) : '';
+  window.open('/api/jobs/' + currentJobId + '/export.xlsx?min_level=' + minLevel + tokenPart);
 }
 
 async function stopCurrentJob() {
@@ -2609,8 +2629,13 @@ async function clearAllData() {
   }
 }
 
-if (TOKEN) loadJobs(); else openKeyModal();
-setInterval(loadJobs, 15000);
+loadSession();
+setInterval(() => {
+  if (currentSession || TOKEN) {
+    loadJobs();
+    loadSession(false);
+  }
+}, 15000);
 setInterval(updateJobDurations, 1000);
 </script>
 </body>

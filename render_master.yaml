@@ -11,7 +11,17 @@ services:
         value: 3.13.4
       - key: MASTER_TOKEN
         sync: false
-      - key: LICENSE_SERVER_URL
+      - key: AOVSHOP_API_URL
         sync: false
+      - key: CHECKPASS_SERVICE_TOKEN
+        sync: false
+      - key: SP1S_FRONTEND_URL
+        value: https://sp1s.shop
+      - key: CHECKPASS_PUBLIC_URL
+        value: https://check.sp1s.shop
+      - key: MASTER_TIMEZONE
+        value: Asia/Ho_Chi_Minh
+      - key: CHECKPASS_MAX_BLOCKS
+        value: 48
       - key: DATABASE_URL
         sync: false

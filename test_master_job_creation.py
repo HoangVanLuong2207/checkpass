@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 from unittest import mock
 from pathlib import Path
@@ -703,6 +704,157 @@ class JobCreationRaceTest(unittest.TestCase):
             release.set()
             self.wait_for_job_status(job_id)
             self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))[0], 2)
+
+    def test_quantity_settlement_retries_and_is_retained_until_confirmed(self) -> None:
+        cutoff = _today_start_timestamp()
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,finished_at,owner_user_id,"
+            "billing_mode,billing_state,external_job_reference,unit_price_tenths,estimated_amount_tenths) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (cutoff - 3600, 2, 15, "done", cutoff - 3500, 77, "quantity", "reserved", "cp-test-settle", 3, 6),
+        )
+        chunk_id = self.inner.exec(
+            "INSERT INTO chunks (job_id,idx,account,status) VALUES (?,?,?,?)",
+            (job_id, 0, json.dumps(["ok|pass", "bad|pass"]), "done"),
+        )
+        for account, status in (("ok", "OK"), ("bad", "FAIL")):
+            self.inner.exec(
+                "INSERT INTO results (chunk_id,job_id,account,row_json,reported_at) VALUES (?,?,?,?,?)",
+                (chunk_id, job_id, account, json.dumps({"status": status}), cutoff - 3500),
+            )
+
+        with mock.patch.object(master_server, "_aovshop_configured", return_value=True), mock.patch.object(
+            master_server, "_aovshop_request", side_effect=RuntimeError("temporary outage")
+        ):
+            self.server._settle_billing_job(job_id)
+
+        state = self.inner.fetchone("SELECT billing_state,billing_error FROM jobs WHERE id=?", (job_id,))
+        self.assertEqual(state[0], "settlement_pending")
+        self.assertIn("temporary outage", state[1])
+        self.assertIsNotNone(self.inner.fetchone("SELECT job_id FROM billing_outbox WHERE job_id=?", (job_id,)))
+        self.assertEqual(_prune_completed_jobs_before_today(self.inner, cutoff)["jobs"], 0)
+        # Keep the row visible after successful settlement so its persisted
+        # fields can be asserted; pruning settled old rows is covered below.
+        self.inner.exec("UPDATE jobs SET created_at=? WHERE id=?", (cutoff + 1, job_id))
+
+        captured: dict = {}
+
+        def settle(path: str, payload: dict, method: str = "POST") -> dict:
+            captured.update(payload)
+            return {"ok": True, "status": "settled", "order_id": 501, "final_amount_tenths": 3}
+
+        with mock.patch.object(master_server, "_aovshop_configured", return_value=True), mock.patch.object(
+            master_server, "_aovshop_request", side_effect=settle
+        ):
+            self.server._settle_billing_job(job_id)
+
+        self.assertEqual(captured["ok_count"], 1)
+        self.assertEqual(captured["fail_count"], 1)
+        self.assertEqual(captured["idempotency_key"], "settle:cp-test-settle")
+        settled = self.inner.fetchone(
+            "SELECT billing_state,final_amount_tenths,billing_order_id FROM jobs WHERE id=?", (job_id,)
+        )
+        self.assertEqual(settled, ("settled", 3, 501))
+        self.assertIsNone(self.inner.fetchone("SELECT job_id FROM billing_outbox WHERE job_id=?", (job_id,)))
+        self.inner.exec("UPDATE jobs SET created_at=? WHERE id=?", (cutoff - 1, job_id))
+        self.assertEqual(_prune_completed_jobs_before_today(self.inner, cutoff)["jobs"], 1)
+
+    def test_expired_time_job_is_not_available_for_new_claims(self) -> None:
+        now = time.time()
+        expired_id = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,billing_mode,billing_state,access_until) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (now - 100, 1, 15, "open", "time", "settled", now - 1),
+        )
+        self.inner.exec(
+            "INSERT INTO chunks (job_id,idx,account,status) VALUES (?,?,?,?)",
+            (expired_id, 0, json.dumps(["expired|pass"]), "pending"),
+        )
+        active_id = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,billing_mode,billing_state,access_until) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (now, 1, 15, "open", "time", "settled", now + 60),
+        )
+        self.inner.exec(
+            "INSERT INTO chunks (job_id,idx,account,status) VALUES (?,?,?,?)",
+            (active_id, 0, json.dumps(["active|pass"]), "pending"),
+        )
+
+        claim = master_server.select_fair_claim_candidate(self.inner, now, "satellite-a")
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim[1], active_id)
+
+    def test_sp1s_mode_never_falls_back_to_open_access_without_master_token(self) -> None:
+        original_token = self.server.master_token
+        self.server.master_token = ""
+        try:
+            with mock.patch.object(master_server, "_aovshop_configured", return_value=True):
+                status, user_error = self.get_error("/api/jobs_list", token="")
+                self.assertEqual(status, 401)
+                self.assertIn("SP1S", user_error["error"])
+
+                status, satellite_error = self.post_error(
+                    "/api/claim", {"satellite_id": "unauthenticated"}, token=""
+                )
+                self.assertEqual(status, 503)
+                self.assertIn("MASTER_TOKEN", satellite_error["error"])
+        finally:
+            self.server.master_token = original_token
+
+    def test_sp1s_login_uses_state_and_creates_http_only_session(self) -> None:
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):
+                return None
+
+        opener = urllib.request.build_opener(NoRedirect())
+
+        def redirect(path: str, cookie: str = ""):
+            headers = {"Cookie": cookie} if cookie else {}
+            try:
+                opener.open(urllib.request.Request(self.base_url + path, headers=headers), timeout=5)
+            except urllib.error.HTTPError as exc:
+                self.assertEqual(exc.code, 303)
+                return exc.headers
+            self.fail("expected redirect")
+
+        def aov_response(path: str, payload=None, method: str = "POST") -> dict:
+            if path.endswith("/sso/exchange"):
+                return {"ok": True, "user": {"id": 91, "name": "SP1S User", "email": "user@example.test"}}
+            if "/account/91" in path:
+                return {
+                    "ok": True,
+                    "user": {"id": 91, "name": "SP1S User", "email": "user@example.test"},
+                    "balance": 9999.4,
+                    "available_balance": 9999.4,
+                    "entitlement": None,
+                }
+            raise AssertionError(path)
+
+        with mock.patch.object(master_server, "_aovshop_configured", return_value=True), mock.patch.object(
+            master_server, "_aovshop_request", side_effect=aov_response
+        ):
+            login_headers = redirect("/auth/login")
+            location = login_headers["Location"]
+            return_url = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["return_url"][0]
+            state = urllib.parse.parse_qs(urllib.parse.urlparse(return_url).query)["state"][0]
+            state_cookie = login_headers.get_all("Set-Cookie")[0].split(";", 1)[0]
+            self.assertIn("HttpOnly", login_headers.get_all("Set-Cookie")[0])
+
+            callback_headers = redirect(
+                "/auth/callback?state=" + urllib.parse.quote(state) + "&code=" + "a" * 32,
+                state_cookie,
+            )
+            session_header = next(
+                value for value in callback_headers.get_all("Set-Cookie")
+                if value.startswith("checkpass_session=") and "Max-Age=0" not in value
+            )
+            self.assertIn("HttpOnly", session_header)
+            session_cookie = session_header.split(";", 1)[0]
+            request = urllib.request.Request(self.base_url + "/api/session", headers={"Cookie": session_cookie})
+            with urllib.request.urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(payload["user"]["id"], 91)
+            self.assertEqual(payload["balance"], 9999.4)
 
 
 if __name__ == "__main__":
