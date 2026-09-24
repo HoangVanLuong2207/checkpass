@@ -26,7 +26,7 @@ _TCP_NESTED = ROOT / (
 _TCP_SIBLING = ROOT / "garena_tcp.py"
 TCP_SOURCES = (_TCP_NESTED, _TCP_SIBLING)
 TCP_SOURCE = _TCP_NESTED
-TCP_SOURCE_SHA256 = "cd76ab2b9eaf9137f40ae27cf3312b6a59795acca7d67f00cbb4bdc6f72e9cd8"
+TCP_SOURCE_SHA256 = "12d75635092e5f2f75a26ce6a773c6aeea46af036df099aa22d7cb4f90c5897a"
 MAX_BODY = 8 * 1024
 LOGIN_LOCK = threading.Lock()
 
@@ -39,7 +39,10 @@ def load_verified_tcp_module() -> ModuleType:
             + "; ".join(str(path) for path in TCP_SOURCES)
         )
 
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    # Git may check text files out as CRLF on Windows and LF on Linux/Render.
+    # Hash canonical LF bytes so the integrity check is platform-independent.
+    canonical_source = source.read_bytes().replace(b"\r\n", b"\n")
+    digest = hashlib.sha256(canonical_source).hexdigest()
     if digest != TCP_SOURCE_SHA256:
         raise RuntimeError(
             f"{source.name} không đúng SHA-256 đã kiểm tra; dừng để tránh chạy mã bị thay đổi"
