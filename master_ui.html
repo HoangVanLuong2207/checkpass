@@ -1447,6 +1447,10 @@ table.data-table tbody tr:hover {
       <button class="btn btn-secondary btn-sm" id="sessionActionBtn" onclick="sessionAction()" title="Tài khoản SP1S">
         <i class="fa-solid fa-right-to-bracket"></i> Đăng nhập
       </button>
+
+      <button class="btn btn-secondary btn-sm" id="registerActionBtn" onclick="registerAction()" title="Tạo tài khoản SP1S">
+        <i class="fa-solid fa-user-plus"></i> Đăng ký
+      </button>
     </div>
   </div>
 </header>
@@ -1780,6 +1784,7 @@ function updateOwnerBadge() {
   const txt = document.getElementById('ownerBadgeText');
   const dot = document.getElementById('keyDot');
   const action = document.getElementById('sessionActionBtn');
+  const registerAction = document.getElementById('registerActionBtn');
   if (txt) {
     if (currentSession && currentSession.user) {
       const balance = Number(currentSession.available_balance ?? currentSession.balance ?? 0)
@@ -1794,6 +1799,7 @@ function updateOwnerBadge() {
   if (action) action.innerHTML = currentSession
     ? '<i class="fa-solid fa-right-from-bracket"></i> Đăng xuất'
     : '<i class="fa-solid fa-right-to-bracket"></i> Đăng nhập';
+  if (registerAction) registerAction.style.display = (currentSession || TOKEN) ? 'none' : 'inline-flex';
 }
 
 function setClearAllButton(visible) {
@@ -1877,6 +1883,10 @@ async function sessionAction() {
   updateOwnerBadge();
   setCreateJobAvailability(false);
   window.location.reload();
+}
+
+function registerAction() {
+  window.location.href = '/auth/register';
 }
 
 loadPublicNotice();

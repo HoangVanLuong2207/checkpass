@@ -67,6 +67,18 @@ class _CountingStore:
         return self.inner.fetchone(sql, args)
 
 
+class PostgreSQLMigrationOrderTest(unittest.TestCase):
+    def test_legacy_columns_are_migrated_before_schema_indexes(self) -> None:
+        table_statements, index_statements = master_server._postgres_schema_phases()
+
+        self.assertTrue(table_statements)
+        self.assertTrue(index_statements)
+        self.assertFalse(any(statement.upper().startswith("CREATE INDEX") for statement in table_statements))
+        self.assertFalse(any(statement.upper().startswith("CREATE UNIQUE INDEX") for statement in table_statements))
+        self.assertTrue(any("jobs(owner_user_id)" in statement for statement in index_statements))
+        self.assertTrue(any("jobs(external_job_reference)" in statement for statement in index_statements))
+
+
 class JobCreationRaceTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
@@ -833,6 +845,15 @@ class JobCreationRaceTest(unittest.TestCase):
         with mock.patch.object(master_server, "_aovshop_configured", return_value=True), mock.patch.object(
             master_server, "_aovshop_request", side_effect=aov_response
         ):
+            register_headers = redirect("/auth/register")
+            register_location = urllib.parse.urlparse(register_headers["Location"])
+            self.assertEqual(register_location.path, "/register")
+            register_redirect = urllib.parse.parse_qs(register_location.query)["redirect"][0]
+            register_connect = urllib.parse.urlparse(register_redirect)
+            self.assertEqual(register_connect.path, "/checkpass/connect")
+            register_return_url = urllib.parse.parse_qs(register_connect.query)["return_url"][0]
+            self.assertEqual(urllib.parse.urlparse(register_return_url).path, "/auth/callback")
+
             login_headers = redirect("/auth/login")
             location = login_headers["Location"]
             return_url = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["return_url"][0]

@@ -314,6 +314,22 @@ _POSTGRES_JOB_BILLING_MIGRATIONS = (
 )
 
 
+def _postgres_schema_phases() -> tuple[list[str], list[str]]:
+    """Defer indexes until additive migrations have upgraded legacy tables."""
+    table_statements: list[str] = []
+    index_statements: list[str] = []
+    for statement in _POSTGRES_SCHEMA.strip().split(";"):
+        statement = statement.strip()
+        if not statement:
+            continue
+        normalized = statement.upper()
+        if normalized.startswith("CREATE INDEX") or normalized.startswith("CREATE UNIQUE INDEX"):
+            index_statements.append(statement)
+        else:
+            table_statements.append(statement)
+    return table_statements, index_statements
+
+
 _SQLITE_JOB_STATS_TRIGGERS = (
     """
     CREATE TRIGGER IF NOT EXISTS trg_job_stats_jobs_insert
@@ -1218,9 +1234,9 @@ class PostgreSQLStore:
         with self._lock:
             with self._conn.transaction():
                 with self._conn.cursor() as cur:
-                    for sql in _POSTGRES_SCHEMA.strip().split(";"):
-                        if sql.strip():
-                            cur.execute(sql)
+                    table_statements, index_statements = _postgres_schema_phases()
+                    for sql in table_statements:
+                        cur.execute(sql)
                     for migration in [
                         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_hash TEXT DEFAULT ''",
                         "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_preview TEXT DEFAULT ''",
@@ -1229,6 +1245,8 @@ class PostgreSQLStore:
                         *_POSTGRES_JOB_BILLING_MIGRATIONS,
                     ]:
                         cur.execute(migration)
+                    for sql in index_statements:
+                        cur.execute(sql)
                     for trigger_sql in _POSTGRES_JOB_STATS_TRIGGER_SQL:
                         cur.execute(trigger_sql)
         _backfill_job_stats_if_needed(self)
@@ -1974,13 +1992,16 @@ class MasterHandler(BaseHTTPRequestHandler):
                     "sp1s_sso": _aovshop_configured(),
                 })
                 return
-            if path == "/auth/login":
+            if path in {"/auth/login", "/auth/register"}:
                 if not _aovshop_configured():
                     self._redirect("/?login_error=" + urllib.parse.quote("SP1S SSO chưa được cấu hình"))
                     return
                 state = secrets.token_urlsafe(32)
                 callback = self._public_base_url() + "/auth/callback?state=" + urllib.parse.quote(state, safe="")
-                target = SP1S_FRONTEND_URL + "/checkpass/connect?return_url=" + urllib.parse.quote(callback, safe="")
+                connect_path = "/checkpass/connect?return_url=" + urllib.parse.quote(callback, safe="")
+                target = SP1S_FRONTEND_URL + connect_path
+                if path == "/auth/register":
+                    target = SP1S_FRONTEND_URL + "/register?redirect=" + urllib.parse.quote(connect_path, safe="")
                 self._redirect(target, [self._sso_state_cookie(state)])
                 return
             if path == "/auth/callback":
