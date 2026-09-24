@@ -1999,9 +1999,10 @@ class MasterHandler(BaseHTTPRequestHandler):
                 state = secrets.token_urlsafe(32)
                 callback = self._public_base_url() + "/auth/callback?state=" + urllib.parse.quote(state, safe="")
                 connect_path = "/checkpass/connect?return_url=" + urllib.parse.quote(callback, safe="")
-                target = SP1S_FRONTEND_URL + connect_path
                 if path == "/auth/register":
                     target = SP1S_FRONTEND_URL + "/register?redirect=" + urllib.parse.quote(connect_path, safe="")
+                else:
+                    target = SP1S_FRONTEND_URL + "/login?redirect=" + urllib.parse.quote(connect_path, safe="")
                 self._redirect(target, [self._sso_state_cookie(state)])
                 return
             if path == "/auth/callback":
