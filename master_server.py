@@ -2032,7 +2032,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "INSERT INTO web_sessions (session_hash,user_id,email,name,is_admin,expires_at,last_seen_at,created_at) VALUES (?,?,?,?,?,?,?,?)",
                         (
                             _session_hash(session), user_id, str(user.get("email") or ""),
-                            str(user.get("name") or ""), 1 if is_admin else 0, now + CHECKPASS_SESSION_SECONDS, now, now,
+                            str(user.get("name") or ""), bool(is_admin), now + CHECKPASS_SESSION_SECONDS, now, now,
                         ),
                     )
                     self._redirect("/?login=success", [self._session_cookie(session), clear_state])
