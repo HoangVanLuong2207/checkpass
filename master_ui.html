@@ -2133,9 +2133,12 @@ function renderJobs(query = '') {
     const processed = Math.min(total, Number(j.processed ?? ((j.ok || 0) + (j.fail || 0) + (j.uncheckable || 0))));
     const percent = progressPercent(processed, total);
     const isDone = j.status === 'done';
+    const isStopping = j.status === 'stopping';
     const status = isDone
       ? '<span class="badge badge-done"><i class="fa-solid fa-check"></i> Hoàn tất</span>'
-      : '<span class="badge badge-running"><i class="fa-solid fa-bolt fa-spin-fast"></i> Đang chạy</span>';
+      : (isStopping
+        ? '<span class="badge badge-running"><i class="fa-solid fa-stop fa-beat"></i> Đang dừng</span>'
+        : '<span class="badge badge-running"><i class="fa-solid fa-bolt fa-spin-fast"></i> Đang chạy</span>');
     const owner = j.owner_preview ? (' · <i class="fa-solid fa-key" style="font-size:10px"></i> ' + esc(j.owner_preview)) : '';
     const activeClass = currentJobId === id ? 'active' : '';
 
@@ -2486,7 +2489,9 @@ async function refreshDetail(forceRows = true) {
 
     document.getElementById('detailStatus').innerHTML = (s.status === 'open')
       ? '<span class="badge badge-running"><i class="fa-solid fa-bolt fa-spin-fast"></i> Đang chạy</span>'
-      : '<span class="badge badge-done"><i class="fa-solid fa-check"></i> Hoàn tất</span>';
+      : ((s.status === 'stopping')
+        ? '<span class="badge badge-running"><i class="fa-solid fa-stop fa-beat"></i> Đang dừng</span>'
+        : '<span class="badge badge-done"><i class="fa-solid fa-check"></i> Hoàn tất</span>');
 
     document.getElementById('detailOwner').innerHTML = s.owner_preview ? ('<i class="fa-solid fa-key" style="color:#EA580C"></i> Key ' + esc(s.owner_preview)) : '';
 
@@ -2535,7 +2540,7 @@ async function refreshDetail(forceRows = true) {
       }
     }
 
-    if (s.status === 'open') scheduleDetail(id);
+    if (s.status === 'open' || s.status === 'stopping') scheduleDetail(id);
   } catch(e) {
     if (id !== currentJobId || requestSeq !== detailRequestSeq) return;
     document.getElementById('detailRows').innerHTML = '<div class="empty-state"><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger)"></i><br>Lỗi: ' + esc(e.message) + '</div>';
@@ -2574,7 +2579,7 @@ async function stopCurrentJob() {
   try {
     const d = await api('/api/jobs/' + currentJobId + '/stop', { method: 'POST', body: '{}' });
     if (!d.ok) throw new Error(d.error || 'Không thể dừng job');
-    toast('⏹ Đã yêu cầu dừng job thành công');
+    toast(d.status === 'stopping' ? '⏹ Đã nhận yêu cầu, đang hoàn tất dừng job' : '⏹ Job đã dừng');
     refreshDetail();
     loadJobs();
   } catch(e) {

@@ -48,6 +48,7 @@ MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
+STOP_FINALIZE_BATCH_SIZE = 250
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
 LICENSE_SERVER_URL = os.environ.get("LICENSE_SERVER_URL", "").strip()
 MASTER_TIMEZONE = os.environ.get("MASTER_TIMEZONE", "Asia/Ho_Chi_Minh").strip() or "Asia/Ho_Chi_Minh"
@@ -1256,6 +1257,72 @@ def _try_prune_completed_jobs(store: Any) -> None:
         print(f"[master] prune old completed data error: {exc}", flush=True)
 
 
+def _finalize_unresolved_job_accounts(store: Any, job_id: int, now: float) -> int:
+    """Persist placeholders for unfinished accounts without one huge DB batch."""
+
+    statements: list[dict[str, Any]] = []
+    marked = 0
+
+    def flush() -> None:
+        if statements:
+            store.batch(list(statements))
+            statements.clear()
+
+    for chunk_id, account_data in store.fetch(
+        "SELECT id, account FROM chunks WHERE job_id=? AND status IN ('pending','claimed')",
+        (job_id,),
+    ):
+        try:
+            credentials = json.loads(account_data)
+        except (TypeError, json.JSONDecodeError):
+            credentials = []
+        if not isinstance(credentials, list):
+            continue
+
+        completed_indexes: set[int] = set()
+        for (row_json,) in store.fetch(
+            "SELECT row_json FROM results WHERE chunk_id=?", (chunk_id,)
+        ):
+            try:
+                row = json.loads(row_json)
+                completed_indexes.add(int(str(row.get("stt") or "0")) - 1)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+
+        for index, credential in enumerate(credentials):
+            if index in completed_indexes:
+                continue
+            account = str(credential).split("|", 1)[0].split(":", 1)[0].strip()
+            if not account:
+                continue
+            row = {
+                "stt": str(index + 1),
+                "account": account,
+                "status": "CHƯA THỂ CHECK",
+                "result_type": "Chưa thể check",
+                "uid": "",
+                "name": "",
+                "level": "",
+                "player_status": "",
+                "elapsed_ms": "0",
+            }
+            statements.append({
+                "sql": "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET row_json=excluded.row_json, reported_at=excluded.reported_at",
+                "args": [
+                    chunk_id,
+                    job_id,
+                    account,
+                    json.dumps(row, ensure_ascii=False),
+                    now,
+                ],
+            })
+            marked += 1
+            if len(statements) >= STOP_FINALIZE_BATCH_SIZE:
+                flush()
+    flush()
+    return marked
+
+
 def _retention_cleanup_loop(store: Any, stop_event: threading.Event) -> None:
     while not stop_event.is_set():
         _try_prune_completed_jobs(store)
@@ -2216,104 +2283,48 @@ class MasterHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_stop_job(self, job_id: int, auth: dict[str, Any]) -> None:
-        """Finish a job, marking every unresolved account as uncheckable."""
+        """Accept a stop immediately; finalize unfinished rows in background."""
 
-        # Stopping can create hundreds of terminal result rows.  Serialize the
-        # complete operation instead of allowing two HTTP handler threads to
-        # interleave those large batches on the same database connection.
-        with self.server.stop_lock:
-            allowed, job = self._check_job_access(job_id, auth)
-            if job is None:
-                self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
-                return
-            if not allowed:
-                self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền dừng job này"})
-                return
-            if job[4] != "open":
-                self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": job[4], "already_stopped": True})
-                return
+        allowed, job = self._check_job_access(job_id, auth)
+        if job is None:
+            self._json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "job không tồn tại"})
+            return
+        if not allowed:
+            self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "không có quyền dừng job này"})
+            return
 
-            store = self.server.store
-            now = _now()
-            # Publish the stop request before generating placeholder results.
-            # Claims/reports and satellite heartbeats all treat any non-open
-            # state as stopped, so no new work starts while finalization runs.
-            changed = store.exec_with_changes(
+        status = str(job[4] or "")
+        store = self.server.store
+        if status == "open":
+            store.exec_with_changes(
                 "UPDATE jobs SET status='stopping' WHERE id=? AND status='open'",
                 (job_id,),
             )
-            if changed == 0:
-                current = store.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
-                status = current[0] if current else "done"
-                # Some libSQL client versions do not expose affected_rows and
-                # therefore report zero even though the UPDATE succeeded.
-                if status != "stopping":
-                    self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": status, "already_stopped": True})
-                    return
+            current = store.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
+            status = str(current[0] if current else "done")
 
-            try:
-                marked_uncheckable = self._finalize_unresolved_accounts(job_id, now)
-                store.batch([
-                    {"sql": "UPDATE chunks SET status='done', lease_until=NULL, reported_at=? WHERE job_id=? AND status IN ('pending','claimed')", "args": [now, job_id]},
-                    {"sql": "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='stopping'", "args": [now, job_id]},
-                ])
-            except Exception as exc:
-                # A failed finalization must remain retryable.  Placeholder
-                # inserts are UPSERTs, so retrying the stop is idempotent.
-                store.exec(
-                    "UPDATE jobs SET status='open' WHERE id=? AND status='stopping'",
-                    (job_id,),
-                )
-                print(f"[master] dừng job {job_id} thất bại: {exc}", flush=True)
-                self._json(
-                    HTTPStatus.INTERNAL_SERVER_ERROR,
-                    {"ok": False, "error": "Không thể hoàn tất yêu cầu dừng job; vui lòng thử lại."},
-                )
-                return
+        if status == "stopping":
+            self.server.schedule_stop_finalization(
+                job_id, self._finalize_unresolved_accounts
+            )
+            self._json(HTTPStatus.ACCEPTED, {
+                "ok": True,
+                "job_id": job_id,
+                "status": "stopping",
+                "accepted": True,
+            })
+            return
 
-            _try_prune_completed_jobs(store)
-            self._json(HTTPStatus.OK, {"ok": True, "job_id": job_id, "status": "done", "marked_uncheckable": marked_uncheckable})
+        self._json(HTTPStatus.OK, {
+            "ok": True,
+            "job_id": job_id,
+            "status": status or "done",
+            "already_stopped": True,
+        })
 
     def _finalize_unresolved_accounts(self, job_id: int, now: float) -> int:
         """Persist a terminal result for accounts in chunks interrupted by Stop."""
-        store = self.server.store
-        statements: list[dict[str, Any]] = []
-        marked = 0
-        for chunk_id, account_data in store.fetch(
-            "SELECT id, account FROM chunks WHERE job_id=? AND status IN ('pending','claimed')", (job_id,)
-        ):
-            try:
-                credentials = json.loads(account_data)
-            except (TypeError, json.JSONDecodeError):
-                credentials = []
-            if not isinstance(credentials, list):
-                continue
-            completed_indexes: set[int] = set()
-            for (row_json,) in store.fetch("SELECT row_json FROM results WHERE chunk_id=?", (chunk_id,)):
-                try:
-                    row = json.loads(row_json)
-                    completed_indexes.add(int(str(row.get("stt") or "0")) - 1)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-            for index, credential in enumerate(credentials):
-                if index in completed_indexes:
-                    continue
-                account = str(credential).split("|", 1)[0].split(":", 1)[0].strip()
-                if not account:
-                    continue
-                row = {
-                    "stt": str(index + 1), "account": account,
-                    "status": "CHƯA THỂ CHECK", "result_type": "Chưa thể check",
-                    "uid": "", "name": "", "level": "", "player_status": "", "elapsed_ms": "0",
-                }
-                statements.append({
-                    "sql": "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?) ON CONFLICT(chunk_id, account) DO UPDATE SET row_json=excluded.row_json, reported_at=excluded.reported_at",
-                    "args": [chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), now],
-                })
-                marked += 1
-        if statements:
-            store.batch(statements)
-        return marked
+        return _finalize_unresolved_job_accounts(self.server.store, job_id, now)
 
     def _handle_claim(self) -> None:
         try:
@@ -3023,6 +3034,79 @@ class CoordinatorServer(ThreadingHTTPServer):
         self.claim_lock = threading.Lock()
         self.job_creation_lock = threading.Lock()
         self.stop_lock = threading.Lock()
+        self._stopping_jobs_lock = threading.Lock()
+        self._stopping_jobs: set[int] = set()
+
+    def schedule_stop_finalization(self, job_id: int, finalizer: Any = None) -> bool:
+        """Run slow stop finalization once per job without blocking its HTTP request."""
+
+        job_id = int(job_id)
+        with self._stopping_jobs_lock:
+            if job_id in self._stopping_jobs:
+                return False
+            self._stopping_jobs.add(job_id)
+
+        if finalizer is None:
+            finalizer = lambda current_job_id, now: _finalize_unresolved_job_accounts(
+                self.store, current_job_id, now
+            )
+        thread = threading.Thread(
+            target=self._finish_stopping_job,
+            args=(job_id, finalizer),
+            name=f"master-stop-job-{job_id}",
+            daemon=True,
+        )
+        thread.start()
+        return True
+
+    def _finish_stopping_job(self, job_id: int, finalizer: Any) -> None:
+        try:
+            # Keep database-heavy stop jobs serialized while HTTP requests stay responsive.
+            with self.stop_lock:
+                current = self.store.fetchone(
+                    "SELECT status FROM jobs WHERE id=?", (job_id,)
+                )
+                if current is None or str(current[0]) != "stopping":
+                    return
+                now = _now()
+                try:
+                    marked_uncheckable = int(finalizer(job_id, now) or 0)
+                    self.store.batch([
+                        {
+                            "sql": "UPDATE chunks SET status='done', lease_until=NULL, reported_at=? WHERE job_id=? AND status IN ('pending','claimed')",
+                            "args": [now, job_id],
+                        },
+                        {
+                            "sql": "UPDATE jobs SET status='done', finished_at=? WHERE id=? AND status='stopping'",
+                            "args": [now, job_id],
+                        },
+                    ])
+                except Exception as exc:
+                    # Placeholder upserts are idempotent, so returning to open
+                    # makes a retry safe even after a partial batch succeeded.
+                    self.store.exec(
+                        "UPDATE jobs SET status='open' WHERE id=? AND status='stopping'",
+                        (job_id,),
+                    )
+                    print(f"[master] failed to stop job {job_id}: {exc}", flush=True)
+                    return
+                print(
+                    f"[master] stopped job {job_id}; "
+                    f"marked {marked_uncheckable} unresolved accounts",
+                    flush=True,
+                )
+                _try_prune_completed_jobs(self.store)
+        finally:
+            with self._stopping_jobs_lock:
+                self._stopping_jobs.discard(job_id)
+
+    def resume_stopping_jobs(self) -> int:
+        """Resume stop requests left in progress by a previous process."""
+
+        jobs = self.store.fetch("SELECT id FROM jobs WHERE status='stopping'")
+        for (job_id,) in jobs:
+            self.schedule_stop_finalization(int(job_id))
+        return len(jobs)
 
 
 def parse_args() -> argparse.Namespace:
@@ -3101,6 +3185,9 @@ def main() -> int:
             db_label = f"sqlite={db_path}"
 
     server = CoordinatorServer((host, port), MasterHandler, store, token)
+    resumed_stops = server.resume_stopping_jobs()
+    if resumed_stops:
+        print(f"[master] resuming {resumed_stops} unfinished stop request(s)", flush=True)
     retention_stop = threading.Event()
     retention_thread = threading.Thread(
         target=_retention_cleanup_loop,

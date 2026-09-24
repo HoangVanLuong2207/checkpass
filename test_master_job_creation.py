@@ -120,6 +120,19 @@ class JobCreationRaceTest(unittest.TestCase):
             finally:
                 exc.close()
 
+    def wait_for_job_status(
+        self, job_id: int, expected: str = "done", timeout: float = 5.0
+    ) -> str:
+        deadline = time.monotonic() + timeout
+        status = ""
+        while time.monotonic() < deadline:
+            row = self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))
+            status = str(row[0]) if row else "missing"
+            if status == expected:
+                return status
+            time.sleep(0.02)
+        self.fail(f"job {job_id} status={status!r}, expected {expected!r}")
+
     def test_claim_cannot_finish_job_before_chunks_are_saved(self) -> None:
         created: dict = {}
 
@@ -504,8 +517,9 @@ class JobCreationRaceTest(unittest.TestCase):
             self.assertEqual(summary["job_id"], job_id)
 
             status, stopped = self.post(f"/api/jobs/{job_id}/stop", {}, token="expired-key")
-            self.assertEqual(status, 200)
-            self.assertEqual(stopped["status"], "done")
+            self.assertEqual(status, 202)
+            self.assertEqual(stopped["status"], "stopping")
+            self.wait_for_job_status(job_id)
 
             status, rows = self.get(f"/api/jobs/{job_id}/rows", token="expired-key")
             self.assertEqual(status, 200)
@@ -588,8 +602,9 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM jobs")[0], 1)
 
         status, stopped = self.post(f"/api/jobs/{first['job_id']}/stop", {})
-        self.assertEqual(status, 200)
-        self.assertEqual(stopped["status"], "done")
+        self.assertEqual(status, 202)
+        self.assertEqual(stopped["status"], "stopping")
+        self.wait_for_job_status(first["job_id"])
 
         status, second = self.post("/api/jobs", {"text": "user2|pass2"}, token="key-b")
         self.assertEqual(status, 200)
@@ -637,10 +652,12 @@ class JobCreationRaceTest(unittest.TestCase):
                 thread.start()
             for thread in threads:
                 thread.join(10)
+            for job_id in (first["job_id"], second["job_id"]):
+                self.wait_for_job_status(job_id)
 
         self.assertFalse(errors)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(sorted(status for status, _ in responses), [200, 200])
+        self.assertEqual(sorted(status for status, _ in responses), [202, 202])
         self.assertEqual(max_active, 1)
         for job_id in (first["job_id"], second["job_id"]):
             self.assertEqual(self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))[0], "done")
@@ -648,6 +665,43 @@ class JobCreationRaceTest(unittest.TestCase):
                 self.inner.fetchone("SELECT COUNT(*) FROM chunks WHERE job_id=? AND status!='done'", (job_id,))[0],
                 0,
             )
+            self.assertEqual(
+                self.inner.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))[0],
+                2,
+            )
+
+    def test_stop_request_returns_before_slow_finalization_finishes(self) -> None:
+        self.store.block_once = False
+        _, created = self.post(
+            "/api/jobs", {"text": "user1|pass1\nuser2|pass2"}, token="key-a"
+        )
+        job_id = created["job_id"]
+        entered = threading.Event()
+        release = threading.Event()
+        original = MasterHandler._finalize_unresolved_accounts
+
+        def blocking_finalize(handler, current_job_id: int, now: float) -> int:
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release stop finalization")
+            return original(handler, current_job_id, now)
+
+        with mock.patch.object(
+            MasterHandler, "_finalize_unresolved_accounts", blocking_finalize
+        ):
+            started = time.monotonic()
+            status, stopped = self.post(f"/api/jobs/{job_id}/stop", {}, token="key-a")
+            elapsed = time.monotonic() - started
+            self.assertEqual(status, 202)
+            self.assertEqual(stopped["status"], "stopping")
+            self.assertLess(elapsed, 1.0)
+            self.assertTrue(entered.wait(2))
+            self.assertEqual(
+                self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))[0],
+                "stopping",
+            )
+            release.set()
+            self.wait_for_job_status(job_id)
             self.assertEqual(self.inner.fetchone("SELECT COUNT(*) FROM results WHERE job_id=?", (job_id,))[0], 2)
 
 
