@@ -1168,6 +1168,10 @@ table.data-table tbody tr:hover {
   overflow: hidden;
   position: relative;
   animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  max-height: min(90vh, 850px);
+  max-height: min(90dvh, 850px);
 }
 .modal-box.modal-wide {
   width: min(800px, 100%);
@@ -1182,18 +1186,23 @@ table.data-table tbody tr:hover {
   background: linear-gradient(90deg, var(--primary), var(--secondary), #D97706);
 }
 
+.sheet-handle {
+  display: none;
+}
+
 @keyframes slideUp {
   from { transform: translateY(20px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
 
 .modal-head {
-  padding: 20px 24px 16px;
+  padding: 18px 24px 14px;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .modal-head h2 {
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -1211,7 +1220,60 @@ table.data-table tbody tr:hover {
 }
 
 .modal-body {
-  padding: 20px 24px;
+  padding: 18px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  flex: 1 1 auto;
+}
+.modal-body::-webkit-scrollbar {
+  width: 6px;
+}
+.modal-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.modal-body::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 99px;
+}
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: #94A3B8;
+}
+
+.modal-quick-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.modal-quick-actions-left,
+.modal-quick-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.submit-billing-card {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #fed7aa;
+  border-radius: 12px;
+  background: #fffaf5;
+}
+.submit-billing-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.hide-mobile {
+  display: inline;
+}
+.show-mobile {
+  display: none !important;
 }
 
 .form-group {
@@ -1276,13 +1338,15 @@ table.data-table tbody tr:hover {
 }
 
 .modal-footer {
-  padding: 14px 24px 20px;
+  padding: 12px 24px 16px;
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+  flex-shrink: 0;
+  background: #FFFFFF;
 }
 
 /* Toast */
@@ -1386,12 +1450,119 @@ table.data-table tbody tr:hover {
     width: 100%;
   }
   .modal-box {
-    border-radius: 16px 16px 0 0;
-    max-height: 94vh;
+    width: 100% !important;
+    max-width: 100% !important;
+    border-radius: 20px 20px 0 0 !important;
+    max-height: 92dvh !important;
+    max-height: 92vh !important;
+    border-bottom: none !important;
+    border-left: none !important;
+    border-right: none !important;
+  }
+  .modal-box.modal-wide {
+    width: 100% !important;
+    max-width: 100% !important;
   }
   .modal-backdrop {
     align-items: flex-end;
     padding: 0;
+  }
+  .sheet-handle {
+    display: block;
+    width: 42px;
+    height: 4px;
+    border-radius: 99px;
+    background: #CBD5E1;
+    margin: 8px auto 0;
+    flex-shrink: 0;
+  }
+  .modal-head {
+    padding: 10px 16px 8px;
+    align-items: center;
+  }
+  .modal-head h2 {
+    font-size: 15.5px;
+    gap: 8px;
+  }
+  .modal-head p {
+    font-size: 11px;
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: calc(100vw - 80px);
+  }
+  .modal-body {
+    padding: 10px 14px 12px;
+  }
+  .modal-quick-actions {
+    margin-bottom: 6px;
+  }
+  .modal-quick-actions .btn {
+    padding: 4px 9px;
+    font-size: 11.5px;
+  }
+  .modal-textarea {
+    height: 120px;
+    min-height: 85px;
+    max-height: 180px;
+    font-size: 15px;
+    padding: 9px 11px;
+    border-radius: 8px;
+  }
+  .textarea-footer-info {
+    font-size: 11px;
+    margin-top: 5px;
+    gap: 6px;
+  }
+  .submit-billing-card {
+    margin-top: 8px;
+    padding: 9px 11px;
+    border-radius: 9px;
+  }
+  .submit-billing-head {
+    margin-bottom: 4px;
+  }
+  .submit-billing-head .form-label {
+    font-size: 11.5px;
+  }
+  #selectedPlanBanner {
+    font-size: 12px !important;
+    margin-bottom: 4px !important;
+    line-height: 1.35;
+  }
+  #billingQuote {
+    margin-top: 6px !important;
+    font-size: 11.5px !important;
+    line-height: 1.35;
+  }
+  .modal-footer {
+    padding: 10px 14px max(12px, env(safe-area-inset-bottom, 12px));
+    gap: 8px;
+    display: flex;
+    box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.05);
+  }
+  .modal-footer .btn-file-import {
+    margin-right: 0 !important;
+    flex: 1 1 auto;
+    font-size: 12px;
+    padding: 7px 10px;
+  }
+  .modal-footer .btn-cancel {
+    padding: 7px 10px;
+    font-size: 12px;
+  }
+  .modal-footer .btn-submit-job {
+    flex: 1.6 1 auto;
+    font-size: 13px;
+    padding: 8px 12px;
+    font-weight: 700;
+  }
+  .hide-mobile {
+    display: none !important;
+  }
+  .show-mobile {
+    display: inline !important;
   }
 }
 
@@ -1608,6 +1779,7 @@ table.data-table tbody tr:hover {
 <!-- Modal Nạp Tiền Trực Tiếp -->
 <div class="modal-backdrop" id="depositModal" onclick="if(event.target===this)closeDepositModal()">
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="depositModalTitle" style="max-width:480px">
+    <div class="sheet-handle" aria-hidden="true"></div>
     <div class="modal-head">
       <div>
         <h2 id="depositModalTitle"><i class="fa-solid fa-qrcode" style="color:var(--secondary)"></i> Nạp Tiền SP1S</h2>
@@ -1707,6 +1879,7 @@ table.data-table tbody tr:hover {
 <!-- Modal Chọn Hình Thức Thanh Toán -->
 <div class="modal-backdrop" id="billingSelectModal" onclick="if(event.target===this)closeModal('billingSelectModal')">
   <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="billingSelectModalTitle">
+    <div class="sheet-handle" aria-hidden="true"></div>
     <div class="modal-head">
       <div>
         <h2 id="billingSelectModalTitle"><i class="fa-solid fa-wallet" style="color:var(--secondary)"></i> Chọn Hình Thức Thanh Toán</h2>
@@ -1758,14 +1931,31 @@ table.data-table tbody tr:hover {
 <!-- Modal Tạo Job -->
 <div class="modal-backdrop" id="submitModal" onclick="if(event.target===this)closeModal('submitModal')">
   <div class="modal-box modal-wide" role="dialog" aria-modal="true" aria-labelledby="submitModalTitle">
+    <div class="sheet-handle" aria-hidden="true"></div>
     <div class="modal-head">
       <div>
-        <h2 id="submitModalTitle"><i class="fa-solid fa-clipboard-list" style="color:var(--secondary)"></i> Tạo Job Kiểm Tra Mới</h2>
-        <p>Dán danh sách tài khoản theo định dạng <code>user|pass</code> hoặc <code>user:pass</code></p>
+        <h2 id="submitModalTitle"><i class="fa-solid fa-clipboard-list" style="color:var(--secondary)"></i> Thêm Tài Khoản Kiểm Tra</h2>
+        <p>Định dạng: <code>user|pass</code> hoặc <code>user:pass</code> (mỗi nick 1 dòng)</p>
       </div>
       <button class="icon-btn" title="Đóng" onclick="closeModal('submitModal')"><i class="fa-solid fa-xmark"></i></button>
     </div>
     <div class="modal-body">
+      <div class="modal-quick-actions">
+        <div class="modal-quick-actions-left">
+          <button type="button" class="btn btn-secondary btn-xs" onclick="pasteClipboardAccounts()" title="Dán nhanh nội dung từ bộ nhớ tạm">
+            <i class="fa-solid fa-paste"></i> Dán nhanh
+          </button>
+          <button type="button" class="btn btn-secondary btn-xs" onclick="document.getElementById('accFile').click()" title="Tải danh sách từ file .txt hoặc .csv">
+            <i class="fa-solid fa-file-arrow-up"></i> Tải file
+          </button>
+        </div>
+        <div class="modal-quick-actions-right">
+          <button type="button" class="btn btn-secondary btn-xs" onclick="clearAccountsInput()" title="Xóa nội dung đã nhập">
+            <i class="fa-solid fa-trash-can"></i> Xóa
+          </button>
+        </div>
+      </div>
+
       <textarea id="accInput" class="modal-textarea" placeholder="Nhập tài khoản, mỗi dòng 1 nick:&#10;account1|password1&#10;account2|password2&#10;account3:password3" oninput="updateAccountCounter()"></textarea>
       
       <div class="textarea-footer-info">
@@ -1779,8 +1969,8 @@ table.data-table tbody tr:hover {
 
       <input type="file" id="accFile" accept=".txt,.csv,text/plain" style="display:none" onchange="importAccountsFile()">
 
-      <div style="margin-top:16px;padding:14px;border:1px solid #fed7aa;border-radius:12px;background:#fffaf5">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="submit-billing-card">
+        <div class="submit-billing-head">
           <div class="form-label" style="margin-bottom:0">Hình thức tính phí:</div>
           <button type="button" class="btn btn-secondary btn-xs" id="btnChangeBillingMode" onclick="openBillingSelectModal(true)" style="padding:3px 10px;font-size:12px">
             <i class="fa-solid fa-arrows-rotate"></i> Đổi gói
@@ -1788,19 +1978,19 @@ table.data-table tbody tr:hover {
         </div>
         <div id="selectedPlanBanner" style="font-weight:600;font-size:14px;color:var(--text);margin-bottom:8px"></div>
         <input type="hidden" name="billingMode" id="billingModeHidden" value="quantity">
-        <div id="timeBlockWrap" style="display:none;margin-top:12px">
-          <label class="form-label" for="blockCount">Số block 30 phút muốn gia hạn/thuê thêm</label>
-          <input id="blockCount" class="form-input" type="number" min="1" max="48" value="1" oninput="scheduleQuote()">
+        <div id="timeBlockWrap" style="display:none;margin-top:10px">
+          <label class="form-label" for="blockCount" style="font-size:12px">Số block 30 phút muốn gia hạn/thuê thêm</label>
+          <input id="blockCount" class="form-input" type="number" min="1" max="48" value="1" oninput="scheduleQuote()" style="padding:6px 10px">
         </div>
-        <div id="billingQuote" style="margin-top:12px;font-size:13px;color:#475569">Nhập danh sách để xem chi phí dự kiến.</div>
+        <div id="billingQuote" style="margin-top:10px;font-size:13px;color:#475569">Nhập danh sách để xem chi phí dự kiến.</div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-secondary btn-sm" style="margin-right:auto" onclick="document.getElementById('accFile').click()">
-        <i class="fa-solid fa-file-import"></i> Nhập từ File (.txt, .csv)
+      <button class="btn btn-secondary btn-sm btn-file-import" style="margin-right:auto" onclick="document.getElementById('accFile').click()">
+        <i class="fa-solid fa-file-import"></i> Nhập<span class="hide-mobile"> từ</span> File<span class="hide-mobile"> (.txt, .csv)</span>
       </button>
-      <button class="btn btn-secondary btn-sm" onclick="closeModal('submitModal')">Hủy</button>
-      <button class="btn btn-primary btn-sm" id="btnSend" onclick="sendJob()">
+      <button class="btn btn-secondary btn-sm btn-cancel" onclick="closeModal('submitModal')">Hủy</button>
+      <button class="btn btn-primary btn-sm btn-submit-job" id="btnSend" onclick="sendJob()">
         <i class="fa-solid fa-paper-plane"></i> Gửi Check Ngay
       </button>
     </div>
@@ -2062,8 +2252,49 @@ function showSubmitModalBox() {
   openModal('submitModal');
   setTimeout(() => {
     const accInput = document.getElementById('accInput');
-    if (accInput) { accInput.focus(); updateAccountCounter(); }
+    if (accInput) {
+      if (window.innerWidth > 640) {
+        accInput.focus();
+      }
+      updateAccountCounter();
+    }
   }, 60);
+}
+
+async function pasteClipboardAccounts() {
+  const accInput = document.getElementById('accInput');
+  if (!accInput) return;
+  try {
+    if (!navigator.clipboard || !navigator.clipboard.readText) {
+      toast('Vui lòng chạm giữ ô nhập để Dán thủ công.');
+      accInput.focus();
+      return;
+    }
+    const clip = await navigator.clipboard.readText();
+    if (!clip || !clip.trim()) {
+      toast('⚠️ Bộ nhớ tạm (clipboard) đang trống!');
+      return;
+    }
+    if (accInput.value.trim()) {
+      accInput.value = accInput.value.trimEnd() + '\n' + clip.trim();
+    } else {
+      accInput.value = clip.trim();
+    }
+    updateAccountCounter();
+    toast('✅ Đã dán tài khoản từ bộ nhớ tạm!');
+  } catch (err) {
+    toast('⚠️ Chạm giữ ô nhập để dán thủ công.');
+    accInput.focus();
+  }
+}
+
+function clearAccountsInput() {
+  const accInput = document.getElementById('accInput');
+  if (!accInput) return;
+  if (!accInput.value.trim()) return;
+  accInput.value = '';
+  updateAccountCounter();
+  toast('🧹 Đã xóa danh sách tài khoản');
 }
 
 function updateAccountCounter() {
