@@ -1432,6 +1432,10 @@ table.data-table tbody tr:hover {
         <span id="ownerBadgeText">Đang tải tài khoản...</span>
       </div>
 
+      <button class="btn btn-warning btn-sm" id="topupBtn" style="display:none;background:#f59e0b;color:#ffffff;border:none" onclick="openDepositModal()" title="Nạp tiền vào tài khoản SP1S">
+        <i class="fa-solid fa-bolt"></i> Nạp Tiền
+      </button>
+
       <button class="btn btn-primary btn-sm" id="createJobBtn" onclick="openSubmitModal()">
         <i class="fa-solid fa-plus"></i> Tạo Job Mới
       </button>
@@ -1597,6 +1601,105 @@ table.data-table tbody tr:hover {
       <div id="detailRows">
         <div class="empty-state"><i class="fa-solid fa-circle-notch fa-spin-fast"></i><br>Đang tải dữ liệu kết quả...</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal Nạp Tiền Trực Tiếp -->
+<div class="modal-backdrop" id="depositModal" onclick="if(event.target===this)closeDepositModal()">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="depositModalTitle" style="max-width:480px">
+    <div class="modal-head">
+      <div>
+        <h2 id="depositModalTitle"><i class="fa-solid fa-qrcode" style="color:var(--secondary)"></i> Nạp Tiền SP1S</h2>
+        <p>Quét mã VietQR chuyển khoản tự động cộng tiền sau vài giây</p>
+      </div>
+      <button class="icon-btn" title="Đóng" onclick="closeDepositModal()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    
+    <!-- Bước 1: Nhập số tiền -->
+    <div class="modal-body" id="depositStepInput" style="padding:18px 20px">
+      <div style="margin-bottom:14px">
+        <label class="form-label" for="depositAmountInput">Số tiền muốn nạp (VNĐ)</label>
+        <div style="position:relative">
+          <input id="depositAmountInput" class="form-input" type="number" min="10000" step="5000" value="20000" placeholder="Tối thiểu 10.000đ" style="font-size:16px;font-weight:600;padding-right:40px">
+          <span style="position:absolute;right:12px;top:50%;transform:translateY(-50%);font-weight:600;color:var(--text-muted)">đ</span>
+        </div>
+        <small id="depositMinNotice" style="color:var(--text-muted);display:block;margin-top:4px">Tối thiểu: 10.000đ</small>
+      </div>
+
+      <div style="display:grid;grid-template-columns:repeat(3, 1fr);gap:8px;margin-bottom:16px">
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(10000)">10.000đ</button>
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(20000)">20.000đ</button>
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(50000)">50.000đ</button>
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(100000)">100.000đ</button>
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(200000)">200.000đ</button>
+        <button type="button" class="btn btn-secondary btn-xs" onclick="setDepositAmount(500000)">500.000đ</button>
+      </div>
+
+      <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:12px;font-size:13px;color:#1e40af;line-height:1.4">
+        <i class="fa-solid fa-circle-info"></i> Hệ thống liên kết trực tiếp với cổng thanh toán <strong>SP1S</strong>. Tiền sẽ vào thẳng số dư tài khoản của bạn ngay khi ngân hàng báo nhận.
+      </div>
+    </div>
+
+    <!-- Bước 2: Hiển thị mã QR và thông tin chuyển khoản -->
+    <div class="modal-body" id="depositStepQR" style="display:none;padding:18px 20px;text-align:center">
+      <div id="depositQRWrap" style="background:#f8fafc;padding:12px;border-radius:12px;border:1px solid #e2e8f0;display:inline-block;margin-bottom:12px">
+        <img id="depositQRImg" src="" alt="VietQR" style="width:230px;height:230px;object-fit:contain;display:block;margin:0 auto;border-radius:8px">
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:14px">
+        <span class="status-dot" style="background:#eab308;animation:pulse 1.5s infinite"></span>
+        <span style="font-size:13px;font-weight:600;color:#854d0e" id="depositWaitingText">Đang đợi thanh toán...</span>
+      </div>
+
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:12px;font-size:13px;text-align:left;line-height:1.6">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--text-muted)">Ngân hàng:</span>
+          <strong id="depositBankName" style="color:var(--text)"></strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+          <span style="color:var(--text-muted)">Số tài khoản:</span>
+          <div>
+            <strong id="depositAccNum" style="color:var(--text)"></strong>
+            <button class="btn btn-secondary btn-xs" style="padding:1px 6px;margin-left:6px;font-size:11px" onclick="copyDepositText('depositAccNum')">Copy</button>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--text-muted)">Chủ tài khoản:</span>
+          <strong id="depositAccName" style="color:var(--text)"></strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <span style="color:var(--text-muted)">Số tiền:</span>
+          <strong id="depositDisplayAmount" style="color:var(--secondary)"></strong>
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;background:#fef3c7;padding:6px 8px;border-radius:6px;border:1px solid #fde68a;margin-top:6px">
+          <span style="color:#92400e;font-size:12px;font-weight:600">Nội dung CK:</span>
+          <div>
+            <strong id="depositRef" style="color:#92400e;font-family:monospace;font-size:13px"></strong>
+            <button class="btn btn-secondary btn-xs" style="padding:1px 6px;margin-left:6px;font-size:11px;background:#ffffff" onclick="copyDepositText('depositRef')">Copy</button>
+          </div>
+        </div>
+      </div>
+      <p style="font-size:12px;color:var(--danger);margin-top:8px;font-weight:500">
+        ⚠️ Bắt buộc giữ nguyên đúng nội dung chuyển khoản để hệ thống tự động cộng tiền!
+      </p>
+    </div>
+
+    <!-- Bước 3: Thành công -->
+    <div class="modal-body" id="depositStepSuccess" style="display:none;padding:24px 20px;text-align:center">
+      <div style="width:60px;height:60px;border-radius:50%;background:#dcfce7;color:#16a34a;display:inline-flex;align-items:center;justify-content:center;font-size:28px;margin-bottom:12px">
+        <i class="fa-solid fa-check"></i>
+      </div>
+      <h3 style="color:#16a34a;font-size:18px;margin-bottom:6px">Nạp tiền thành công!</h3>
+      <p id="depositSuccessText" style="font-size:14px;color:var(--text-muted);margin-bottom:16px"></p>
+      <button class="btn btn-primary btn-sm" onclick="closeDepositModal()">Hoàn tất</button>
+    </div>
+
+    <div class="modal-footer" id="depositModalFooter">
+      <button class="btn btn-secondary btn-sm" onclick="closeDepositModal()">Hủy</button>
+      <button class="btn btn-primary btn-sm" id="btnConfirmDeposit" onclick="submitDepositCreate()">
+        <i class="fa-solid fa-arrow-right"></i> Tạo Mã QR
+      </button>
     </div>
   </div>
 </div>
@@ -1771,6 +1874,126 @@ function closeModal(id) {
   }
 }
 
+// --- Direct In-App Deposit Flow ---
+let depositPollTimer = null;
+let currentDepositRef = null;
+
+async function openDepositModal() {
+  if (!currentSession && !TOKEN) {
+    toast('⚠️ Vui lòng đăng nhập SP1S trước khi nạp tiền');
+    window.location.href = '/auth/login';
+    return;
+  }
+  // Reset step
+  document.getElementById('depositStepInput').style.display = 'block';
+  document.getElementById('depositStepQR').style.display = 'none';
+  document.getElementById('depositStepSuccess').style.display = 'none';
+  document.getElementById('depositModalFooter').style.display = 'flex';
+  const btn = document.getElementById('btnConfirmDeposit');
+  btn.disabled = false;
+  btn.innerHTML = '<i class="fa-solid fa-arrow-right"></i> Tạo Mã QR';
+
+  openModal('depositModal');
+  try {
+    const res = await api('/api/deposit/config');
+    if (res.ok && res.minimum_deposit_amount) {
+      const minFormatted = Number(res.minimum_deposit_amount).toLocaleString('vi-VN');
+      const notice = document.getElementById('depositMinNotice');
+      if (notice) notice.textContent = 'Tối thiểu: ' + minFormatted + 'đ';
+      const input = document.getElementById('depositAmountInput');
+      if (input) input.min = res.minimum_deposit_amount;
+    }
+  } catch (_) {}
+}
+
+function closeDepositModal() {
+  if (depositPollTimer) {
+    clearInterval(depositPollTimer);
+    depositPollTimer = null;
+  }
+  currentDepositRef = null;
+  closeModal('depositModal');
+}
+
+function setDepositAmount(amount) {
+  const input = document.getElementById('depositAmountInput');
+  if (input) input.value = amount;
+}
+
+function copyDepositText(elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  const text = el.textContent.trim();
+  navigator.clipboard.writeText(text).then(() => {
+    toast('📋 Đã sao chép: ' + text);
+  }).catch(() => {
+    toast('⚠️ Không sao chép được');
+  });
+}
+
+async function submitDepositCreate() {
+  const input = document.getElementById('depositAmountInput');
+  const amount = Number(input?.value || 0);
+  if (!amount || amount < 10000) {
+    toast('⚠️ Số tiền nạp tối thiểu là 10.000đ');
+    return;
+  }
+  const btn = document.getElementById('btnConfirmDeposit');
+  btn.disabled = true;
+  btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tạo mã...';
+
+  try {
+    const res = await api('/api/deposit/create', {
+      method: 'POST',
+      body: JSON.stringify({ amount }),
+    });
+    if (!res.ok) {
+      throw new Error(res.error || 'Không thể tạo đơn nạp');
+    }
+    // Hiển thị bước 2: QR & info
+    currentDepositRef = res.reference;
+    document.getElementById('depositQRImg').src = res.qr_url;
+    document.getElementById('depositBankName').textContent = res.bank_name;
+    document.getElementById('depositAccNum').textContent = res.account_number;
+    document.getElementById('depositAccName').textContent = res.account_name;
+    document.getElementById('depositDisplayAmount').textContent = Number(res.amount).toLocaleString('vi-VN') + 'đ';
+    document.getElementById('depositRef').textContent = res.reference;
+
+    document.getElementById('depositStepInput').style.display = 'none';
+    document.getElementById('depositStepQR').style.display = 'block';
+    document.getElementById('depositModalFooter').style.display = 'none';
+
+    // Bắt đầu thăm dò trạng thái tự động mỗi 3 giây
+    startDepositPolling(res.reference);
+  } catch (err) {
+    toast('❌ ' + err.message);
+    btn.disabled = false;
+    btn.innerHTML = '<i class="fa-solid fa-arrow-right"></i> Tạo Mã QR';
+  }
+}
+
+function startDepositPolling(reference) {
+  if (depositPollTimer) clearInterval(depositPollTimer);
+  depositPollTimer = setInterval(async () => {
+    try {
+      const res = await api('/api/deposit/status/' + encodeURIComponent(reference));
+      if (res.ok && res.status === 'completed') {
+        clearInterval(depositPollTimer);
+        depositPollTimer = null;
+        // Thành công: chuyển sang Step 3
+        document.getElementById('depositStepQR').style.display = 'none';
+        document.getElementById('depositStepSuccess').style.display = 'block';
+        document.getElementById('depositSuccessText').textContent =
+          'Đã cộng ' + Number(res.amount).toLocaleString('vi-VN') + 'đ vào tài khoản SP1S của bạn!';
+        toast('🎉 Nạp tiền thành công!');
+        // Refresh lại session và quote ngay lập tức
+        await loadSession(false);
+        scheduleQuote();
+      }
+    } catch (_) {}
+  }, 3000);
+}
+
 function openSubmitModal() {
   if (!currentSession && !TOKEN) {
     toast('⚠️ Vui lòng đăng nhập tài khoản SP1S trước khi tạo job');
@@ -1905,6 +2128,8 @@ function updateOwnerBadge() {
     ? '<i class="fa-solid fa-right-from-bracket"></i> Đăng xuất'
     : '<i class="fa-solid fa-right-to-bracket"></i> Đăng nhập';
   if (registerAction) registerAction.style.display = (currentSession || TOKEN) ? 'none' : 'inline-flex';
+  const topupBtn = document.getElementById('topupBtn');
+  if (topupBtn) topupBtn.style.display = (currentSession && currentSession.user && !isAdminKey) ? 'inline-flex' : 'none';
 }
 
 function setClearAllButton(visible) {
@@ -2065,7 +2290,11 @@ async function refreshQuote() {
       message += '<br><small>Đây là mức tạm giữ tối đa; số tiền thực tế = số OK × 0,3đ.</small>';
       if (data.entitlement) message += '<br><strong style="color:#b45309">Bạn đang có quyền theo giờ; nên chọn Theo thời gian để tối ưu chi phí.</strong>';
     }
-    if (!data.affordable) message += '<br><strong style="color:#b91c1c">Số dư không đủ để chạy.</strong>';
+    if (!data.affordable) {
+      message += '<br><strong style="color:#b91c1c">Số dư không đủ để chạy.</strong> ' +
+        '<button type="button" class="btn btn-warning btn-xs" onclick="openDepositModal()" style="margin-left:6px;padding:2px 8px;font-size:12px;background:#f59e0b;color:#fff;border:none">' +
+        '<i class="fa-solid fa-bolt"></i> Nạp Ngay</button>';
+    }
     target.innerHTML = message;
     target.dataset.affordable = data.affordable ? '1' : '0';
     target.dataset.hasEntitlement = data.entitlement ? '1' : '0';

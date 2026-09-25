@@ -2128,6 +2128,28 @@ class MasterHandler(BaseHTTPRequestHandler):
             if path == "/api/admin/prune_before_today":
                 self._handle_prune_before_today()
                 return
+            if path == "/api/deposit/config":
+                auth = self._require_user()
+                if auth is None:
+                    return
+                try:
+                    res = _aovshop_request("/api/integrations/checkpass/deposit/config", method="GET")
+                    self._json(HTTPStatus.OK, res)
+                except Exception as exc:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)})
+                return
+            parts = path.strip("/").split("/")
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "deposit" and parts[2] == "status":
+                auth = self._require_user()
+                if auth is None:
+                    return
+                ref = parts[3]
+                try:
+                    res = _aovshop_request(f"/api/integrations/checkpass/deposit/status/{urllib.parse.quote(ref)}", method="GET")
+                    self._json(HTTPStatus.OK, res)
+                except Exception as exc:
+                    self._json(HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)})
+                return
             # Các API user cần xác thực license key (hoặc MASTER_TOKEN cho admin)
             auth = self._require_job_owner()
             if auth is None:
@@ -2199,6 +2221,24 @@ class MasterHandler(BaseHTTPRequestHandler):
                 if self._require_admin() is None:
                     return
                 self._handle_satellite_health()
+                return
+            if path == "/api/deposit/create":
+                auth = self._require_user()
+                if auth is None:
+                    return
+                try:
+                    body = self._read_json()
+                    user_id = int(auth.get("user_id") or 0)
+                    if user_id <= 0:
+                        raise ValueError("Tài khoản không hợp lệ")
+                    amount = int(body.get("amount") or 0)
+                    res = _aovshop_request("/api/integrations/checkpass/deposit/create", {
+                        "user_id": user_id,
+                        "amount": amount,
+                    })
+                    self._json(HTTPStatus.OK, res)
+                except Exception as exc:
+                    self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
                 return
             if path == "/api/jobs":
                 auth = self._require_user()
