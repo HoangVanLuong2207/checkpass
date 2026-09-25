@@ -856,7 +856,12 @@ class JobCreationRaceTest(unittest.TestCase):
 
             login_headers = redirect("/auth/login")
             location = login_headers["Location"]
-            return_url = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["return_url"][0]
+            login_location = urllib.parse.urlparse(location)
+            self.assertEqual(login_location.path, "/login")
+            login_redirect = urllib.parse.parse_qs(login_location.query)["redirect"][0]
+            login_connect = urllib.parse.urlparse(login_redirect)
+            self.assertEqual(login_connect.path, "/checkpass/connect")
+            return_url = urllib.parse.parse_qs(login_connect.query)["return_url"][0]
             state = urllib.parse.parse_qs(urllib.parse.urlparse(return_url).query)["state"][0]
             state_cookie = login_headers.get_all("Set-Cookie")[0].split(";", 1)[0]
             self.assertIn("HttpOnly", login_headers.get_all("Set-Cookie")[0])
