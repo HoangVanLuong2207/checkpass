@@ -1624,7 +1624,7 @@ table.data-table tbody tr:hover {
               <span style="font-size:12px;font-weight:700;color:var(--secondary);background:#fff7ed;padding:2px 8px;border-radius:6px;border:1px solid #fed7aa">0,3đ / acc OK</span>
             </div>
             <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
-              Chỉ tính tiền các nick <strong>ĐÚNG MẬT KHẨU (OK)</strong>. Sai pass, 2FA hoặc lỗi sẽ được hoàn lại 100%. Phù hợp check số lượng ít hoặc vừa.
+              Chỉ tính tiền các nick <strong>ĐÚNG MẬT KHẨU (OK)</strong>. Sai pass, 2FA hoặc lỗi sẽ được hoàn lại 100%. <strong>Phù hợp: &lt; 16.000 tài khoản.</strong>
             </div>
           </div>
         </div>
@@ -1640,7 +1640,7 @@ table.data-table tbody tr:hover {
               <span style="font-size:12px;font-weight:700;color:#16a34a;background:#f0fdf4;padding:2px 8px;border-radius:6px;border:1px solid #bbf7d0">5.000đ / 30 phút</span>
             </div>
             <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
-              Không giới hạn số lượng tài khoản check trong suốt thời gian thuê. Rất tiết kiệm nếu check số lượng lớn từ hàng nghìn acc trở lên.
+              Không giới hạn số lượng tài khoản check trong suốt thời gian thuê. <strong>Phù hợp: &gt; 16.000 tài khoản.</strong>
             </div>
           </div>
         </div>
@@ -2060,7 +2060,7 @@ async function refreshQuote() {
       ? '<strong style="color:#047857"><i class="fa-solid fa-crown"></i> Quyền Quản trị viên: Miễn phí hoàn toàn, không giới hạn tài khoản.</strong>'
       : data.covered_by_time
       ? '<strong style="color:#047857">Đang có quyền theo giờ: không trừ thêm tiền.</strong>'
-      : '<strong>Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
+      : '<strong style="color:#dc2626">Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
     if (mode === 'quantity') {
       message += '<br><small>Đây là mức tạm giữ tối đa; số tiền thực tế = số OK × 0,3đ.</small>';
       if (data.entitlement) message += '<br><strong style="color:#b45309">Bạn đang có quyền theo giờ; nên chọn Theo thời gian để tối ưu chi phí.</strong>';
