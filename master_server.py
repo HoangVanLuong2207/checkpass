@@ -58,6 +58,9 @@ VVIP_BLOCK_PRICE_TENTHS = 100_000
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
 STOP_FINALIZE_BATCH_SIZE = 250
+RETENTION_RESULT_BATCH_SIZE = 1_000
+RETENTION_CHUNK_BATCH_SIZE = 250
+RETENTION_BATCH_GAP_SECONDS = 0.25
 CHECKPASS_SESSION_SECONDS = 7 * 24 * 60 * 60
 try:
     MAX_CHECKPASS_TIME_BLOCKS = int(os.environ.get("CHECKPASS_MAX_BLOCKS", "48"))
@@ -1471,45 +1474,71 @@ def _today_start_timestamp(now_timestamp: float | None = None) -> float:
     return now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
 
 
-def _prune_completed_jobs_before_today(store: Any, cutoff: float | None = None) -> dict[str, int]:
-    """Delete only completed jobs from previous local dates; never touch running jobs."""
-    cutoff = _today_start_timestamp() if cutoff is None else float(cutoff)
-    # Quantity jobs must remain available until SP1S has confirmed settlement.
-    # Otherwise the daily cleanup could erase the only retry source after a
-    # temporary network/backend outage.
-    predicate = (
-        "created_at < ? AND status='done' AND "
-        "COALESCE(billing_state,'none') NOT IN ('reserved','settlement_pending')"
-    )
-    old_totals = store.fetchone(
-        "SELECT COUNT(*), COALESCE(SUM(s.pending_chunks+s.claimed_chunks+s.done_chunks),0), "
-        "COALESCE(SUM(s.result_count),0) FROM jobs j "
-        "JOIN job_stats s ON s.job_id=j.id WHERE j.created_at < ? AND j.status='done' "
-        "AND COALESCE(j.billing_state,'none') NOT IN ('reserved','settlement_pending')",
-        (cutoff,),
-    )
-    store.batch([
-        # Remove aggregates first so deleting a large expired job does not run
-        # one counter UPDATE for every result row. The following deletes remove
-        # the source rows in the same transaction/batch.
-        {"sql": f"DELETE FROM job_stats WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
-        {"sql": f"DELETE FROM job_result_stats WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
-        {"sql": f"DELETE FROM results WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
-        {"sql": f"DELETE FROM chunks WHERE job_id IN (SELECT id FROM jobs WHERE {predicate})", "args": (cutoff,)},
-        {"sql": f"DELETE FROM jobs WHERE {predicate}", "args": (cutoff,)},
-    ])
+def _maintenance_window(now_timestamp: float | None = None) -> dict[str, Any]:
+    tz_info = _master_tzinfo()
+    now = datetime.now(tz_info) if now_timestamp is None else datetime.fromtimestamp(now_timestamp, tz_info)
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(minutes=30)
+    active = start <= now < end
     return {
-        "jobs": int(old_totals[0] if old_totals else 0),
-        "chunks": int(old_totals[1] if old_totals else 0),
-        "results": int(old_totals[2] if old_totals else 0),
+        "active": active,
+        "timezone": MASTER_TIMEZONE,
+        "starts_at": start.isoformat(),
+        "ends_at": end.isoformat(),
+        "retry_after_seconds": max(0, int((end - now).total_seconds())) if active else 0,
+        "message": "Hệ thống đang thực hiện dọn dẹp dữ liệu hôm trước, vui lòng quay lại sau 0h30.",
     }
 
 
-def _try_prune_completed_jobs(store: Any) -> None:
-    try:
-        _prune_completed_jobs_before_today(store)
-    except Exception as exc:
-        print(f"[master] prune old completed data error: {exc}", flush=True)
+def _prune_completed_jobs_batch(store: Any, cutoff: float | None = None) -> dict[str, Any]:
+    """Delete one bounded slice of expired data and yield the database quickly."""
+    cutoff = _today_start_timestamp() if cutoff is None else float(cutoff)
+    target = store.fetchone(
+        "SELECT id FROM jobs WHERE created_at < ? AND status='done' AND "
+        "COALESCE(billing_state,'none') NOT IN ('reserved','settlement_pending') "
+        "ORDER BY id LIMIT 1",
+        (cutoff,),
+    )
+    if target is None:
+        return {"complete": True, "jobs": 0, "chunks": 0, "results": 0}
+
+    job_id = int(target[0])
+    # Remove aggregates first. Their delete triggers would otherwise update the
+    # same counter row once for every result in a very large expired job.
+    store.exec("DELETE FROM job_result_stats WHERE job_id=?", (job_id,))
+    store.exec("DELETE FROM job_stats WHERE job_id=?", (job_id,))
+
+    deleted_results = store.exec_with_changes(
+        "DELETE FROM results WHERE id IN (SELECT id FROM results WHERE job_id=? ORDER BY id LIMIT ?)",
+        (job_id, RETENTION_RESULT_BATCH_SIZE),
+    )
+    if store.fetchone("SELECT 1 FROM results WHERE job_id=? LIMIT 1", (job_id,)) is not None:
+        return {"complete": False, "jobs": 0, "chunks": 0, "results": max(0, int(deleted_results or 0))}
+
+    deleted_chunks = store.exec_with_changes(
+        "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks WHERE job_id=? ORDER BY id LIMIT ?)",
+        (job_id, RETENTION_CHUNK_BATCH_SIZE),
+    )
+    if store.fetchone("SELECT 1 FROM chunks WHERE job_id=? LIMIT 1", (job_id,)) is not None:
+        return {
+            "complete": False, "jobs": 0,
+            "chunks": max(0, int(deleted_chunks or 0)),
+            "results": max(0, int(deleted_results or 0)),
+        }
+
+    store.exec("DELETE FROM billing_outbox WHERE job_id=?", (job_id,))
+    deleted_jobs = store.exec_with_changes("DELETE FROM jobs WHERE id=?", (job_id,))
+    return {
+        "complete": False,
+        "jobs": max(0, int(deleted_jobs or 0)),
+        "chunks": max(0, int(deleted_chunks or 0)),
+        "results": max(0, int(deleted_results or 0)),
+    }
+
+
+def _prune_completed_jobs_before_today(store: Any, cutoff: float | None = None) -> dict[str, Any]:
+    """Compatibility entrypoint; intentionally performs only one bounded batch."""
+    return _prune_completed_jobs_batch(store, cutoff)
 
 
 def _finalize_unresolved_job_accounts(store: Any, job_id: int, now: float) -> int:
@@ -1578,14 +1607,15 @@ def _finalize_unresolved_job_accounts(store: Any, job_id: int, now: float) -> in
     return marked
 
 
-def _retention_cleanup_loop(store: Any, stop_event: threading.Event) -> None:
+def _retention_cleanup_loop(server: Any, stop_event: threading.Event) -> None:
     while not stop_event.is_set():
-        _try_prune_completed_jobs(store)
+        if _maintenance_window().get("active"):
+            server.schedule_retention_cleanup()
         try:
-            store.exec("DELETE FROM web_sessions WHERE expires_at<=?", (_now(),))
+            server.store.exec("DELETE FROM web_sessions WHERE expires_at<=?", (_now(),))
         except Exception as exc:
             print(f"[master] expired session cleanup error: {exc}", flush=True)
-        stop_event.wait(60)
+        stop_event.wait(30)
 
 
 def _max_running_jobs(store: Any) -> int:
@@ -2086,13 +2116,20 @@ class MasterHandler(BaseHTTPRequestHandler):
             if path == "/healthz":
                 mt = self.server.master_token or ""
                 lu = os.environ.get("LICENSE_SERVER_URL", "").strip() or LICENSE_SERVER_URL
+                maintenance = _maintenance_window()
                 self._json(HTTPStatus.OK, {
                     "ok": True, "role": "master", "now": _now(),
                     "master_token_configured": bool(mt),
                     "satellite_token_shared": True,
                     "license_url": lu[:60] if lu and not _aovshop_configured() else "disabled",
                     "sp1s_sso": _aovshop_configured(),
+                    "maintenance": maintenance,
                 })
+                return
+            if path == "/api/public/maintenance":
+                maintenance = _maintenance_window()
+                maintenance["cleanup"] = self.server.retention_cleanup_status()
+                self._json(HTTPStatus.OK, {"ok": True, "maintenance": maintenance})
                 return
             if path in {"/auth/login", "/auth/register"}:
                 if not _aovshop_configured():
@@ -2347,6 +2384,15 @@ class MasterHandler(BaseHTTPRequestHandler):
                     self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
                 return
             if path == "/api/jobs":
+                maintenance = _maintenance_window()
+                if maintenance.get("active"):
+                    self._json(HTTPStatus.SERVICE_UNAVAILABLE, {
+                        "ok": False,
+                        "code": "DAILY_MAINTENANCE",
+                        "error": maintenance["message"],
+                        "maintenance": maintenance,
+                    })
+                    return
                 auth = self._require_user()
                 if auth is None:
                     return
@@ -2766,28 +2812,24 @@ class MasterHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_prune_before_today(self) -> None:
-        """Xóa job đã hoàn thành trước hôm nay; giữ nguyên mọi job đang chạy."""
+        """Queue bounded cleanup and return immediately instead of blocking the DB."""
         master_token = self.server.master_token or ""
         auth = self._get_auth_info()
         if not master_token or not auth.get("is_admin"):
             self._json(HTTPStatus.FORBIDDEN, {"ok": False, "error": "chỉ MASTER_TOKEN mới được phép dọn dữ liệu cũ"})
             return
 
-        try:
-            tz_info = _master_tzinfo()
-            cutoff = _today_start_timestamp()
-            deleted = _prune_completed_jobs_before_today(self.server.store, cutoff)
-        except Exception as exc:
-            print(f"[master] prune old data error: {exc}", flush=True)
-            self._json(HTTPStatus.INTERNAL_SERVER_ERROR, {"ok": False, "error": f"không thể dọn dữ liệu: {exc}"[:300]})
-            return
-
-        self._json(HTTPStatus.OK, {
+        tz_info = _master_tzinfo()
+        cutoff = _today_start_timestamp()
+        started = self.server.schedule_retention_cleanup(cutoff)
+        self._json(HTTPStatus.ACCEPTED, {
             "ok": True,
+            "accepted": True,
+            "started": started,
             "timezone": MASTER_TIMEZONE,
             "cutoff": cutoff,
             "cutoff_local": datetime.fromtimestamp(cutoff, tz_info).strftime("%Y-%m-%d 00:00:00 %Z"),
-            "deleted": deleted,
+            "cleanup": self.server.retention_cleanup_status(),
         })
 
     def _handle_jobs_list(self, auth: dict[str, Any] | None = None) -> None:
@@ -2905,6 +2947,15 @@ class MasterHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus(getattr(exc, "status", 503)), {"ok": False, "code": getattr(exc, "code", ""), "error": str(exc)})
 
     def _handle_create_job(self, auth: dict[str, Any] | None = None) -> None:
+        maintenance = _maintenance_window()
+        if maintenance.get("active"):
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {
+                "ok": False,
+                "code": "DAILY_MAINTENANCE",
+                "error": maintenance["message"],
+                "maintenance": maintenance,
+            })
+            return
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -3520,7 +3571,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self.server.schedule_billing(int(job_id))
                 finished_any = True
         if finished_any:
-            _try_prune_completed_jobs(store)
+            self.server.schedule_retention_cleanup()
 
     @staticmethod
     def _is_job_access_allowed(job: tuple, auth: dict[str, Any] | None) -> bool:
@@ -3945,6 +3996,73 @@ class CoordinatorServer(ThreadingHTTPServer):
         self._stopping_jobs: set[int] = set()
         self._billing_jobs_lock = threading.Lock()
         self._billing_jobs: set[int] = set()
+        self._retention_lock = threading.Lock()
+        self._retention_running = False
+        self._retention_status: dict[str, Any] = {
+            "running": False,
+            "started_at": None,
+            "finished_at": None,
+            "cutoff": None,
+            "jobs": 0,
+            "chunks": 0,
+            "results": 0,
+            "error": "",
+        }
+
+    def retention_cleanup_status(self) -> dict[str, Any]:
+        with self._retention_lock:
+            return dict(self._retention_status)
+
+    def schedule_retention_cleanup(self, cutoff: float | None = None) -> bool:
+        cutoff = _today_start_timestamp() if cutoff is None else float(cutoff)
+        with self._retention_lock:
+            if self._retention_running:
+                return False
+            self._retention_running = True
+            self._retention_status = {
+                "running": True,
+                "started_at": _now(),
+                "finished_at": None,
+                "cutoff": cutoff,
+                "jobs": 0,
+                "chunks": 0,
+                "results": 0,
+                "error": "",
+            }
+        threading.Thread(
+            target=self._run_retention_cleanup,
+            args=(cutoff,),
+            name="master-retention-batches",
+            daemon=True,
+        ).start()
+        return True
+
+    def _run_retention_cleanup(self, cutoff: float) -> None:
+        try:
+            while True:
+                batch = _prune_completed_jobs_batch(self.store, cutoff)
+                with self._retention_lock:
+                    for key in ("jobs", "chunks", "results"):
+                        self._retention_status[key] += int(batch.get(key) or 0)
+                if batch.get("complete"):
+                    break
+                time.sleep(RETENTION_BATCH_GAP_SECONDS)
+        except Exception as exc:
+            with self._retention_lock:
+                self._retention_status["error"] = str(exc)[:300]
+            print(f"[master] retention cleanup stopped: {exc}", flush=True)
+        finally:
+            with self._retention_lock:
+                self._retention_running = False
+                self._retention_status["running"] = False
+                self._retention_status["finished_at"] = _now()
+            status = self.retention_cleanup_status()
+            print(
+                f"[master] retention cleanup finished: jobs={status['jobs']} "
+                f"chunks={status['chunks']} results={status['results']} "
+                f"error={status['error'] or 'none'}",
+                flush=True,
+            )
 
     def schedule_stop_finalization(self, job_id: int, finalizer: Any = None) -> bool:
         """Run slow stop finalization once per job without blocking its HTTP request."""
@@ -4005,7 +4123,7 @@ class CoordinatorServer(ThreadingHTTPServer):
                     flush=True,
                 )
                 self.schedule_billing(job_id)
-                _try_prune_completed_jobs(self.store)
+                self.schedule_retention_cleanup()
         finally:
             with self._stopping_jobs_lock:
                 self._stopping_jobs.discard(job_id)
@@ -4087,7 +4205,7 @@ class CoordinatorServer(ThreadingHTTPServer):
                 f"{_money_from_tenths(final_tenths)} VND",
                 flush=True,
             )
-            _try_prune_completed_jobs(self.store)
+            self.schedule_retention_cleanup()
         except Exception as exc:
             error_message = str(exc)[:500]
             current = self.store.fetchone(
@@ -4233,6 +4351,9 @@ def main() -> int:
             db_label = f"sqlite={db_path}"
 
     server = CoordinatorServer((host, port), MasterHandler, store, token)
+    # Resume an interrupted previous-day cleanup after any process restart. The
+    # worker exits immediately when no eligible data remains.
+    server.schedule_retention_cleanup()
     resumed_stops = server.resume_stopping_jobs()
     if resumed_stops:
         print(f"[master] resuming {resumed_stops} unfinished stop request(s)", flush=True)
@@ -4250,7 +4371,7 @@ def main() -> int:
     retention_stop = threading.Event()
     retention_thread = threading.Thread(
         target=_retention_cleanup_loop,
-        args=(store, retention_stop),
+        args=(server, retention_stop),
         name="master-retention-cleanup",
         daemon=True,
     )

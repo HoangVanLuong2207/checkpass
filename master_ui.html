@@ -2025,6 +2025,19 @@ table.data-table tbody tr:hover {
   </div>
 </div>
 
+<div class="modal-backdrop" id="maintenanceModal">
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="maintenanceModalTitle" style="max-width:520px;text-align:center">
+    <div class="modal-body" style="padding:34px 28px">
+      <div style="font-size:52px;color:#f59e0b;margin-bottom:14px"><i class="fa-solid fa-database fa-beat-fade"></i></div>
+      <h2 id="maintenanceModalTitle" style="margin:0 0 12px">Hệ thống đang bảo trì dữ liệu</h2>
+      <p style="margin:0;color:var(--text-muted);line-height:1.7">Hệ thống đang thực hiện dọn dẹp dữ liệu hôm trước, vui lòng quay lại sau <strong>0h30</strong>.</p>
+      <div style="margin-top:18px;padding:10px 14px;border-radius:10px;background:#fff7ed;color:#9a3412;font-weight:700">
+        <i class="fa-regular fa-clock"></i> Thời gian bảo trì hằng ngày: 00:00–00:30
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Floating Toast -->
 <div id="toast"><i class="fa-solid fa-circle-info"></i> <span id="toastText"></span></div>
 
@@ -3269,8 +3282,26 @@ async function clearAllData() {
   }
 }
 
-loadSession();
+async function bootWithMaintenanceCheck() {
+  try {
+    const response = await fetch('/api/public/maintenance', { cache: 'no-store' });
+    const data = await response.json();
+    const maintenance = data?.maintenance;
+    if (maintenance?.active) {
+      openModal('maintenanceModal');
+      const retryAfter = Math.max(5, Number(maintenance.retry_after_seconds || 0) + 2);
+      setTimeout(() => window.location.reload(), retryAfter * 1000);
+      return;
+    }
+  } catch (_) {
+    // Nếu endpoint trạng thái tạm lỗi, luồng đăng nhập hiện tại vẫn xử lý lỗi mạng.
+  }
+  loadSession();
+}
+
+bootWithMaintenanceCheck();
 setInterval(() => {
+  if (document.getElementById('maintenanceModal')?.classList.contains('open')) return;
   if (currentSession || TOKEN) {
     loadJobs();
     loadSession(false);
