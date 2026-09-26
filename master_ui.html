@@ -2061,6 +2061,8 @@ let isAdminKey = false;
 let canCreateJobs = false;
 let maxAccountsPerJob = null;
 let maxVvipAccountsPerJob = null;
+let minAccountsPerJob = 1;
+let minVvipAccountsPerJob = 1;
 let currentRawRows = [];
 let currentFilter = 'all';
 let currentSearch = '';
@@ -2462,6 +2464,10 @@ async function loadSession(loadJobsAfter = true) {
     maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
     const configuredVvipLimit = Number(data.max_vvip_accounts_per_job);
     maxVvipAccountsPerJob = Number.isInteger(configuredVvipLimit) && configuredVvipLimit > 0 ? configuredVvipLimit : null;
+    const configuredMinimum = Number(data.min_accounts_per_job);
+    minAccountsPerJob = Number.isInteger(configuredMinimum) && configuredMinimum > 0 ? configuredMinimum : 1;
+    const configuredVvipMinimum = Number(data.min_vvip_accounts_per_job);
+    minVvipAccountsPerJob = Number.isInteger(configuredVvipMinimum) && configuredVvipMinimum > 0 ? configuredVvipMinimum : 1;
     setCreateJobAvailability(true);
     setClearAllButton(isAdminKey);
     updateOwnerBadge();
@@ -2589,6 +2595,11 @@ async function sendJob() {
     return value.length > 0 && !value.startsWith('#');
   }).length;
   const billingMode = selectedBillingMode();
+  const activeAccountMinimum = billingMode === 'vvip' ? minVvipAccountsPerJob : minAccountsPerJob;
+  if (Number.isInteger(activeAccountMinimum) && accountCount < activeAccountMinimum) {
+    toast('❌ Mỗi job ' + (billingMode === 'vvip' ? 'VVIP ' : '') + 'cần tối thiểu ' + formatNumber(activeAccountMinimum) + ' tài khoản');
+    return;
+  }
   const activeAccountLimit = billingMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
   if (Number.isInteger(activeAccountLimit) && accountCount > activeAccountLimit) {
     toast('❌ Mỗi job ' + (billingMode === 'vvip' ? 'VVIP ' : '') + 'chỉ được gửi tối đa ' + formatNumber(activeAccountLimit) + ' tài khoản');

@@ -42,9 +42,11 @@ DEFAULT_CHUNK_LIMIT = 15
 MAX_CHUNK_LIMIT = 15
 DEFAULT_MAX_RUNNING_JOBS = 10
 MAX_CONFIGURED_RUNNING_JOBS = 10_000
+DEFAULT_MIN_ACCOUNTS_PER_JOB = 1
 DEFAULT_MAX_ACCOUNTS_PER_JOB = 1_000
 MAX_CONFIGURED_ACCOUNTS_PER_JOB = 1_000_000
 DEFAULT_MAX_VVIP_RUNNING_JOBS = 10
+DEFAULT_MIN_VVIP_ACCOUNTS_PER_JOB = 1
 DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB = 1_000
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 3
@@ -1355,32 +1357,43 @@ def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[Pa
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
 
 
-def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue_type: str = "normal") -> tuple | None:
+def select_fair_claim_candidate(
+    store: Any,
+    now: float,
+    satellite_id: str,
+    queue_type: str = "normal",
+    allow_overflow: bool = False,
+) -> tuple | None:
     """Select one eligible chunk from the open job with the fewest active chunks.
 
     Choosing a chunk globally would make a job's claim probability proportional
     to its remaining chunk count.  Selecting the least-active job first prevents
     a large job from starving smaller jobs. Normal jobs stay entirely in the
-    normal pool; VVIP jobs alternate chunks between VVIP (even idx) and normal
-    (odd idx), giving VVIP the extra chunk when the total is odd.
+    normal pool. VVIP jobs initially alternate chunks between VVIP (even idx)
+    and normal (odd idx). Once a service pool has no preferred chunk left, it
+    may claim the other half of a VVIP job so uneven satellite pools stay busy.
     """
 
+    if queue_type == "vvip":
+        preferred_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0"
+        overflow_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1"
+    else:
+        preferred_filter = """(
+            COALESCE(j.queue_type,'normal')='normal'
+            OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
+        )"""
+        overflow_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0"
+    route_filter = overflow_filter if allow_overflow else preferred_filter
+
     selected_job = store.fetchone(
-        """
+        f"""
         SELECT available.job_id
         FROM (
             SELECT DISTINCT c.job_id
             FROM chunks AS c
             JOIN jobs AS j ON j.id=c.job_id
             WHERE j.status='open'
-              AND (
-                  (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0)
-                  OR
-                  (?='normal' AND (
-                      COALESCE(j.queue_type,'normal')='normal'
-                      OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
-                  ))
-              )
+              AND ({route_filter})
               AND (j.billing_mode NOT IN ('time','vvip') OR j.access_until IS NULL OR j.access_until>?)
               AND (
                   c.status='pending'
@@ -1398,25 +1411,18 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
         ORDER BY COALESCE(active.active_count, 0) ASC, available.job_id ASC
         LIMIT 1
         """,
-        (queue_type, queue_type, now, now, satellite_id, now),
+        (now, now, satellite_id, now),
     )
     if selected_job is None:
         return None
 
     return store.fetchone(
-        """
+        f"""
         SELECT c.id, c.job_id, c.account
         FROM chunks AS c
         JOIN jobs AS j ON j.id=c.job_id
         WHERE c.job_id=?
-          AND (
-              (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0)
-              OR
-              (?='normal' AND (
-                  COALESCE(j.queue_type,'normal')='normal'
-                  OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
-              ))
-          )
+          AND ({route_filter})
           AND (
               c.status='pending'
               OR (c.status='claimed' AND c.lease_until IS NOT NULL AND c.lease_until < ?)
@@ -1425,7 +1431,7 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
         ORDER BY RANDOM()
         LIMIT 1
         """,
-        (selected_job[0], queue_type, queue_type, now, satellite_id),
+        (selected_job[0], now, satellite_id),
     )
 
 
@@ -1604,6 +1610,16 @@ def _max_accounts_per_job(store: Any) -> int:
     return value
 
 
+def _min_accounts_per_job(store: Any) -> int:
+    try:
+        value = int(_setting(store, "min_accounts_per_job", str(DEFAULT_MIN_ACCOUNTS_PER_JOB)))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_ACCOUNTS_PER_JOB
+    if not 1 <= value <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+        return DEFAULT_MIN_ACCOUNTS_PER_JOB
+    return value
+
+
 def _max_vvip_running_jobs(store: Any) -> int:
     try:
         value = int(_setting(store, "max_vvip_running_jobs", str(DEFAULT_MAX_VVIP_RUNNING_JOBS)))
@@ -1621,6 +1637,16 @@ def _max_vvip_accounts_per_job(store: Any) -> int:
         return DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB
     if not 1 <= value <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
         return DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB
+    return value
+
+
+def _min_vvip_accounts_per_job(store: Any) -> int:
+    try:
+        value = int(_setting(store, "min_vvip_accounts_per_job", str(DEFAULT_MIN_VVIP_ACCOUNTS_PER_JOB)))
+    except (TypeError, ValueError):
+        return DEFAULT_MIN_VVIP_ACCOUNTS_PER_JOB
+    if not 1 <= value <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+        return DEFAULT_MIN_VVIP_ACCOUNTS_PER_JOB
     return value
 
 
@@ -2121,14 +2147,18 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "user": {"id": auth.get("user_id", 0), "name": auth.get("name", "Admin"), "email": auth.get("email", "")},
                         "is_admin": True,
                         "role": "admin",
+                        "min_accounts_per_job": _min_accounts_per_job(self.server.store),
                         "max_accounts_per_job": None,
+                        "min_vvip_accounts_per_job": _min_vvip_accounts_per_job(self.server.store),
                         "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                     })
                     return
                 result = _aovshop_request(f"/api/integrations/checkpass/account/{int(auth['user_id'])}", method="GET")
                 self._json(HTTPStatus.OK, {
                     "ok": True, "authenticated": True,
+                    "min_accounts_per_job": _min_accounts_per_job(self.server.store),
                     "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                    "min_vvip_accounts_per_job": _min_vvip_accounts_per_job(self.server.store),
                     "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                     **result,
                 })
@@ -2434,8 +2464,10 @@ class MasterHandler(BaseHTTPRequestHandler):
         targets_text = _setting(store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
         vvip_targets_text = _setting(store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
         max_running_jobs = _max_running_jobs(store)
+        min_accounts_per_job = _min_accounts_per_job(store)
         max_accounts_per_job = _max_accounts_per_job(store)
         max_vvip_running_jobs = _max_vvip_running_jobs(store)
+        min_vvip_accounts_per_job = _min_vvip_accounts_per_job(store)
         max_vvip_accounts_per_job = _max_vvip_accounts_per_job(store)
         running_jobs = _running_job_count(store, "normal")
         vvip_running_jobs = _running_job_count(store, "vvip")
@@ -2447,10 +2479,12 @@ class MasterHandler(BaseHTTPRequestHandler):
             "vvip_satellite_targets": vvip_targets_text,
             "vvip_satellite_count": len(parse_satellite_targets(vvip_targets_text)),
             "max_running_jobs": max_running_jobs,
+            "min_accounts_per_job": min_accounts_per_job,
             "max_accounts_per_job": max_accounts_per_job,
             "running_jobs": running_jobs,
             "available_job_slots": max(0, max_running_jobs - running_jobs),
             "max_vvip_running_jobs": max_vvip_running_jobs,
+            "min_vvip_accounts_per_job": min_vvip_accounts_per_job,
             "max_vvip_accounts_per_job": max_vvip_accounts_per_job,
             "vvip_running_jobs": vvip_running_jobs,
             "vvip_available_job_slots": max(0, max_vvip_running_jobs - vvip_running_jobs),
@@ -2465,8 +2499,10 @@ class MasterHandler(BaseHTTPRequestHandler):
         targets_value = body.get("satellite_targets")
         vvip_targets_value = body.get("vvip_satellite_targets")
         max_running_value = body.get("max_running_jobs")
+        min_accounts_value = body.get("min_accounts_per_job")
         max_accounts_value = body.get("max_accounts_per_job")
         max_vvip_running_value = body.get("max_vvip_running_jobs")
+        min_vvip_accounts_value = body.get("min_vvip_accounts_per_job")
         max_vvip_accounts_value = body.get("max_vvip_accounts_per_job")
         values: dict[str, str] = {}
         if notice is not None:
@@ -2535,6 +2571,23 @@ class MasterHandler(BaseHTTPRequestHandler):
                 })
                 return
             values["max_running_jobs"] = str(max_running_jobs)
+        if min_accounts_value is not None:
+            try:
+                if isinstance(min_accounts_value, bool):
+                    raise ValueError
+                if isinstance(min_accounts_value, float) and not min_accounts_value.is_integer():
+                    raise ValueError
+                min_accounts_per_job = int(min_accounts_value)
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "số tài khoản tối thiểu/job phải là số nguyên"})
+                return
+            if not 1 <= min_accounts_per_job <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "error": f"số tài khoản tối thiểu/job phải từ 1 đến {MAX_CONFIGURED_ACCOUNTS_PER_JOB:,}",
+                })
+                return
+            values["min_accounts_per_job"] = str(min_accounts_per_job)
         if max_accounts_value is not None:
             try:
                 if isinstance(max_accounts_value, bool):
@@ -2569,6 +2622,23 @@ class MasterHandler(BaseHTTPRequestHandler):
                 })
                 return
             values["max_vvip_running_jobs"] = str(max_vvip_running_jobs)
+        if min_vvip_accounts_value is not None:
+            try:
+                if isinstance(min_vvip_accounts_value, bool):
+                    raise ValueError
+                if isinstance(min_vvip_accounts_value, float) and not min_vvip_accounts_value.is_integer():
+                    raise ValueError
+                min_vvip_accounts_per_job = int(min_vvip_accounts_value)
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "số tài khoản tối thiểu/job VVIP phải là số nguyên"})
+                return
+            if not 1 <= min_vvip_accounts_per_job <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "error": f"số tài khoản tối thiểu/job VVIP phải từ 1 đến {MAX_CONFIGURED_ACCOUNTS_PER_JOB:,}",
+                })
+                return
+            values["min_vvip_accounts_per_job"] = str(min_vvip_accounts_per_job)
         if max_vvip_accounts_value is not None:
             try:
                 if isinstance(max_vvip_accounts_value, bool):
@@ -2586,6 +2656,16 @@ class MasterHandler(BaseHTTPRequestHandler):
                 })
                 return
             values["max_vvip_accounts_per_job"] = str(max_vvip_accounts_per_job)
+        effective_min = int(values.get("min_accounts_per_job", _min_accounts_per_job(self.server.store)))
+        effective_max = int(values.get("max_accounts_per_job", _max_accounts_per_job(self.server.store)))
+        if effective_min > effective_max:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "số tài khoản tối thiểu/job thường không được lớn hơn số tối đa"})
+            return
+        effective_vvip_min = int(values.get("min_vvip_accounts_per_job", _min_vvip_accounts_per_job(self.server.store)))
+        effective_vvip_max = int(values.get("max_vvip_accounts_per_job", _max_vvip_accounts_per_job(self.server.store)))
+        if effective_vvip_min > effective_vvip_max:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "số tài khoản tối thiểu/job VVIP không được lớn hơn số tối đa"})
+            return
         if not values:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không có cấu hình để lưu"})
             return
@@ -2857,6 +2937,24 @@ class MasterHandler(BaseHTTPRequestHandler):
             if queue_type == "vvip"
             else _max_accounts_per_job(store)
         )
+        min_accounts_per_job = (
+            _min_vvip_accounts_per_job(store)
+            if queue_type == "vvip"
+            else _min_accounts_per_job(store)
+        )
+        if len(parsed) < min_accounts_per_job:
+            self._json(HTTPStatus.BAD_REQUEST, {
+                "ok": False,
+                "code": "VVIP_ACCOUNT_MINIMUM_NOT_REACHED" if queue_type == "vvip" else "ACCOUNT_MINIMUM_NOT_REACHED",
+                "error": (
+                    f"Mỗi job {'VVIP ' if queue_type == 'vvip' else ''}cần tối thiểu {min_accounts_per_job:,} tài khoản. "
+                    f"Danh sách hiện có {len(parsed):,} tài khoản."
+                ),
+                "submitted_accounts": len(parsed),
+                "min_accounts_per_job": min_accounts_per_job,
+                "queue_type": queue_type,
+            })
+            return
         account_limit_applies = queue_type == "vvip" or not is_admin
         if account_limit_applies and len(parsed) > max_accounts_per_job:
             self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
@@ -3141,6 +3239,10 @@ class MasterHandler(BaseHTTPRequestHandler):
         with self.server.claim_lock:
             for _ in range(3):
                 row = select_fair_claim_candidate(store, now, satellite_id, queue_type)
+                if row is None:
+                    row = select_fair_claim_candidate(
+                        store, now, satellite_id, queue_type, allow_overflow=True
+                    )
                 if row is None:
                     break
                 chunk_id, job_id, account_data = row
