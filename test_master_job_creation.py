@@ -67,6 +67,38 @@ class _CountingStore:
         return self.inner.fetchone(sql, args)
 
 
+class ParseAccountsValidationTest(unittest.TestCase):
+    def test_format_error_includes_line_number_and_original_content(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            master_server.parse_accounts("valid|password\n  invalid data  ")
+
+        self.assertEqual(
+            str(raised.exception),
+            'Dòng 2: cần định dạng user|pass, user|pass|mail hoặc '
+            'user|pass|mail|passmail (hoặc user:pass). '
+            'Nội dung dòng: "  invalid data  "',
+        )
+
+    def test_invalid_credentials_error_includes_line_and_content(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            master_server.parse_accounts("valid|password\n|missing-user")
+
+        self.assertEqual(
+            str(raised.exception),
+            'Dòng 2: tài khoản/mật khẩu không hợp lệ. '
+            'Nội dung dòng: "|missing-user"',
+        )
+
+    def test_error_content_keeps_unicode_readable(self) -> None:
+        with self.assertRaises(ValueError) as raised:
+            master_server.parse_accounts("tài khoản không có dấu phân cách")
+
+        self.assertIn(
+            'Nội dung dòng: "tài khoản không có dấu phân cách"',
+            str(raised.exception),
+        )
+
+
 class PostgreSQLMigrationOrderTest(unittest.TestCase):
     def test_legacy_columns_are_migrated_before_schema_indexes(self) -> None:
         table_statements, index_statements = master_server._postgres_schema_phases()
@@ -145,6 +177,17 @@ class JobCreationRaceTest(unittest.TestCase):
                 return status
             time.sleep(0.02)
         self.fail(f"job {job_id} status={status!r}, expected {expected!r}")
+
+    def test_create_job_format_error_reports_line_content(self) -> None:
+        status, payload = self.post_error(
+            "/api/jobs",
+            {"text": "valid|password\ninvalid data"},
+        )
+
+        self.assertEqual(status, 400)
+        self.assertFalse(payload["ok"])
+        self.assertIn("Dòng 2:", payload["error"])
+        self.assertIn('Nội dung dòng: "invalid data"', payload["error"])
 
     def test_claim_cannot_finish_job_before_chunks_are_saved(self) -> None:
         created: dict = {}

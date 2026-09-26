@@ -1306,6 +1306,11 @@ class ParsedAccount:
     raw_line: str = ""
 
 
+def _account_line_error(line_number: int, raw_line: str, reason: str) -> ValueError:
+    rendered_line = json.dumps(raw_line, ensure_ascii=False)
+    return ValueError(f"Dòng {line_number}: {reason}. Nội dung dòng: {rendered_line}")
+
+
 def parse_accounts(text: str) -> list[ParsedAccount]:
     result: list[ParsedAccount] = []
     for line_number, raw in enumerate(text.splitlines(), 1):
@@ -1315,7 +1320,11 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
         if "|" in line:
             parts = line.split("|")
             if len(parts) < 2:
-                raise ValueError(f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)")
+                raise _account_line_error(
+                    line_number,
+                    raw,
+                    "cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)",
+                )
             account = parts[0].strip()
             password = parts[1].strip()
         elif line.count(":") == 1:
@@ -1323,9 +1332,17 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
             account = account.strip()
             password = password.strip()
         else:
-            raise ValueError(f"Dòng {line_number}: cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)")
+            raise _account_line_error(
+                line_number,
+                raw,
+                "cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)",
+            )
         if not account or not password or len(account) > 128 or len(password) > 1024:
-            raise ValueError(f"Dòng {line_number}: tài khoản/mật khẩu không hợp lệ")
+            raise _account_line_error(
+                line_number,
+                raw,
+                "tài khoản/mật khẩu không hợp lệ",
+            )
         result.append(ParsedAccount(account, password, raw_line=line))
     if not result:
         raise ValueError("Danh sách trống hoặc không có dòng hợp lệ")
