@@ -13,7 +13,7 @@ services:
         value: "2"
       - key: MASTER_URL
         value: "https://checkpass-4grp.onrender.com"
-      - key: VVIP_MASTER_TOKEN
+      - key: MASTER_TOKEN
         sync: false
       - key: SATELLITE_ID
         value: render-vvip-satellite-1

@@ -116,7 +116,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.inner = LocalStore(Path(self.temp_dir.name) / "master-test.db")
         self.store = _BlockingCreateStore(self.inner)
-        self.server = CoordinatorServer(("127.0.0.1", 0), MasterHandler, self.store, "secret", "vvip-secret")
+        self.server = CoordinatorServer(("127.0.0.1", 0), MasterHandler, self.store, "secret")
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
@@ -247,12 +247,12 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(normal_claim["claim"]["queue_type"], "normal")
 
         denied_status, _ = self.post_error(
-            "/api/vvip/claim", {"satellite_id": "fake-vvip"}, token="secret"
+            "/api/vvip/claim", {"satellite_id": "fake-vvip"}, token="wrong-secret"
         )
         self.assertEqual(denied_status, 401)
 
         status, vvip_claim = self.post(
-            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="vvip-secret"
+            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="secret"
         )
         self.assertEqual(status, 200)
         self.assertEqual(vvip_claim["claim"]["job_id"], vvip_job)
@@ -274,7 +274,7 @@ class JobCreationRaceTest(unittest.TestCase):
         _, normal_claim = self.post("/api/claim", {"satellite_id": "normal-satellite"})
         self.assertIsNone(normal_claim["claim"])
         _, vvip_claim = self.post(
-            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="vvip-secret"
+            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="secret"
         )
         self.assertEqual(vvip_claim["claim"]["job_id"], created["job_id"])
 

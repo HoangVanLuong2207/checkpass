@@ -44,6 +44,8 @@ DEFAULT_MAX_RUNNING_JOBS = 10
 MAX_CONFIGURED_RUNNING_JOBS = 10_000
 DEFAULT_MAX_ACCOUNTS_PER_JOB = 1_000
 MAX_CONFIGURED_ACCOUNTS_PER_JOB = 1_000_000
+DEFAULT_MAX_VVIP_RUNNING_JOBS = 10
+DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB = 1_000
 DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
@@ -63,7 +65,6 @@ if MAX_CHECKPASS_TIME_BLOCKS < 1:
     MAX_CHECKPASS_TIME_BLOCKS = 48
 AOVSHOP_API_URL = os.environ.get("AOVSHOP_API_URL", "").strip().rstrip("/")
 CHECKPASS_SERVICE_TOKEN = os.environ.get("CHECKPASS_SERVICE_TOKEN", "").strip()
-VVIP_MASTER_TOKEN = os.environ.get("VVIP_MASTER_TOKEN", "").strip()
 SP1S_FRONTEND_URL = os.environ.get("SP1S_FRONTEND_URL", "https://sp1s.shop").strip().rstrip("/")
 CHECKPASS_PUBLIC_URL = os.environ.get("CHECKPASS_PUBLIC_URL", "").strip().rstrip("/")
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
@@ -1596,9 +1597,32 @@ def _max_accounts_per_job(store: Any) -> int:
     return value
 
 
-def _running_job_count(store: Any) -> int:
+def _max_vvip_running_jobs(store: Any) -> int:
+    try:
+        value = int(_setting(store, "max_vvip_running_jobs", str(DEFAULT_MAX_VVIP_RUNNING_JOBS)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_VVIP_RUNNING_JOBS
+    if not 1 <= value <= MAX_CONFIGURED_RUNNING_JOBS:
+        return DEFAULT_MAX_VVIP_RUNNING_JOBS
+    return value
+
+
+def _max_vvip_accounts_per_job(store: Any) -> int:
+    try:
+        value = int(_setting(store, "max_vvip_accounts_per_job", str(DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB)))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB
+    if not 1 <= value <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+        return DEFAULT_MAX_VVIP_ACCOUNTS_PER_JOB
+    return value
+
+
+def _running_job_count(store: Any, queue_type: str = "normal") -> int:
     # "creating" reserves a slot until all chunks are committed and the job opens.
-    row = store.fetchone("SELECT COUNT(*) FROM job_stats WHERE job_status IN ('creating','open')")
+    row = store.fetchone(
+        "SELECT COUNT(*) FROM jobs WHERE status IN ('creating','open') AND COALESCE(queue_type,'normal')=?",
+        (queue_type,),
+    )
     return int(row[0] or 0) if row else 0
 
 
@@ -1922,32 +1946,25 @@ class MasterHandler(BaseHTTPRequestHandler):
         return None
 
     def _require_satellite(self, expected_queue: str | None = None) -> dict[str, Any] | None:
-        """Authenticate a normal or VVIP satellite and bind it to its queue."""
-        normal_token = (self.server.master_token or "").strip()
-        vvip_token = (self.server.vvip_master_token or "").strip()
-        if expected_queue == "vvip" and not vvip_token:
-            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "VVIP_MASTER_TOKEN chưa được cấu hình"})
-            return None
-        if not normal_token and expected_queue != "vvip":
+        """Authenticate a satellite with the shared token and bind its endpoint to a queue."""
+        master_token = (self.server.master_token or "").strip()
+        if not master_token:
             if _aovshop_requested() or _aovshop_configured():
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "MASTER_TOKEN chưa được cấu hình"})
                 return None
             # Không đặt MASTER_TOKEN → cho phép mọi vệ tinh (tương thích cũ, tránh chặn)
-            return {"authorized": True, "is_admin": True, "is_satellite": True, "queue_type": "normal", "owner_hash": "", "owner_preview": "", "token": ""}
+            queue_type = expected_queue or "normal"
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "queue_type": queue_type, "owner_hash": "", "owner_preview": queue_type, "token": ""}
         token = self._extract_token()
         if not token:
             self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "thiếu token vệ tinh trong header Authorization"})
             return None
         token_clean = token.strip()
-        matched_queue = ""
-        if token_clean and normal_token and secrets.compare_digest(token_clean, normal_token):
-            matched_queue = "normal"
-        elif token_clean and vvip_token and secrets.compare_digest(token_clean, vvip_token):
-            matched_queue = "vvip"
-        if matched_queue and (expected_queue is None or matched_queue == expected_queue):
-            return {"authorized": True, "is_admin": matched_queue == "normal", "is_satellite": True, "queue_type": matched_queue, "owner_hash": "", "owner_preview": matched_queue, "token": token}
+        if token_clean and secrets.compare_digest(token_clean, master_token):
+            queue_type = expected_queue or "normal"
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "queue_type": queue_type, "owner_hash": "", "owner_preview": queue_type, "token": token}
         print(f"[master] satellite auth FAIL: expected={expected_queue or 'any'} token_len={len(token_clean)}", flush=True)
-        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ hoặc không đúng loại service"})
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "MASTER_TOKEN vệ tinh không hợp lệ"})
         return None
 
     def _require_admin(self) -> dict[str, Any] | None:
@@ -2039,7 +2056,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {
                     "ok": True, "role": "master", "now": _now(),
                     "master_token_configured": bool(mt),
-                    "vvip_master_token_configured": bool(self.server.vvip_master_token),
+                    "satellite_token_shared": True,
                     "license_url": lu[:60] if lu and not _aovshop_configured() else "disabled",
                     "sp1s_sso": _aovshop_configured(),
                 })
@@ -2098,12 +2115,14 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "is_admin": True,
                         "role": "admin",
                         "max_accounts_per_job": None,
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                     })
                     return
                 result = _aovshop_request(f"/api/integrations/checkpass/account/{int(auth['user_id'])}", method="GET")
                 self._json(HTTPStatus.OK, {
                     "ok": True, "authenticated": True,
                     "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                    "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                     **result,
                 })
                 return
@@ -2122,6 +2141,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "ok": True, "valid": True, "can_create_job": True,
                         "is_admin": bool(auth.get("is_admin")),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                         "user": {"id": auth.get("user_id"), "name": auth.get("name"), "email": auth.get("email")},
                     })
                     return
@@ -2142,6 +2162,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "is_admin": True,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                         "info": {"mode": "master_token"},
                     })
                     return
@@ -2155,6 +2176,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "is_admin": False,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                         "info": info,
                     })
                 else:
@@ -2371,6 +2393,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "is_admin": True,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                         "info": {"mode": "master_token"},
                     })
                     return
@@ -2382,6 +2405,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                         "is_admin": False,
                         "preview": _preview_key(tok),
                         "max_accounts_per_job": _max_accounts_per_job(self.server.store),
+                        "max_vvip_accounts_per_job": _max_vvip_accounts_per_job(self.server.store),
                         "info": info,
                     })
                 else:
@@ -2404,7 +2428,10 @@ class MasterHandler(BaseHTTPRequestHandler):
         vvip_targets_text = _setting(store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
         max_running_jobs = _max_running_jobs(store)
         max_accounts_per_job = _max_accounts_per_job(store)
-        running_jobs = _running_job_count(store)
+        max_vvip_running_jobs = _max_vvip_running_jobs(store)
+        max_vvip_accounts_per_job = _max_vvip_accounts_per_job(store)
+        running_jobs = _running_job_count(store, "normal")
+        vvip_running_jobs = _running_job_count(store, "vvip")
         self._json(HTTPStatus.OK, {
             "ok": True,
             "notice": _notice_payload(store),
@@ -2416,6 +2443,10 @@ class MasterHandler(BaseHTTPRequestHandler):
             "max_accounts_per_job": max_accounts_per_job,
             "running_jobs": running_jobs,
             "available_job_slots": max(0, max_running_jobs - running_jobs),
+            "max_vvip_running_jobs": max_vvip_running_jobs,
+            "max_vvip_accounts_per_job": max_vvip_accounts_per_job,
+            "vvip_running_jobs": vvip_running_jobs,
+            "vvip_available_job_slots": max(0, max_vvip_running_jobs - vvip_running_jobs),
         })
 
     def _handle_admin_settings_save(self) -> None:
@@ -2428,6 +2459,8 @@ class MasterHandler(BaseHTTPRequestHandler):
         vvip_targets_value = body.get("vvip_satellite_targets")
         max_running_value = body.get("max_running_jobs")
         max_accounts_value = body.get("max_accounts_per_job")
+        max_vvip_running_value = body.get("max_vvip_running_jobs")
+        max_vvip_accounts_value = body.get("max_vvip_accounts_per_job")
         values: dict[str, str] = {}
         if notice is not None:
             if not isinstance(notice, dict):
@@ -2512,6 +2545,40 @@ class MasterHandler(BaseHTTPRequestHandler):
                 })
                 return
             values["max_accounts_per_job"] = str(max_accounts_per_job)
+        if max_vvip_running_value is not None:
+            try:
+                if isinstance(max_vvip_running_value, bool):
+                    raise ValueError
+                if isinstance(max_vvip_running_value, float) and not max_vvip_running_value.is_integer():
+                    raise ValueError
+                max_vvip_running_jobs = int(max_vvip_running_value)
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "giới hạn job VVIP phải là số nguyên"})
+                return
+            if not 1 <= max_vvip_running_jobs <= MAX_CONFIGURED_RUNNING_JOBS:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "error": f"giới hạn job VVIP phải từ 1 đến {MAX_CONFIGURED_RUNNING_JOBS:,}",
+                })
+                return
+            values["max_vvip_running_jobs"] = str(max_vvip_running_jobs)
+        if max_vvip_accounts_value is not None:
+            try:
+                if isinstance(max_vvip_accounts_value, bool):
+                    raise ValueError
+                if isinstance(max_vvip_accounts_value, float) and not max_vvip_accounts_value.is_integer():
+                    raise ValueError
+                max_vvip_accounts_per_job = int(max_vvip_accounts_value)
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "giới hạn tài khoản/job VVIP phải là số nguyên"})
+                return
+            if not 1 <= max_vvip_accounts_per_job <= MAX_CONFIGURED_ACCOUNTS_PER_JOB:
+                self._json(HTTPStatus.BAD_REQUEST, {
+                    "ok": False,
+                    "error": f"giới hạn tài khoản/job VVIP phải từ 1 đến {MAX_CONFIGURED_ACCOUNTS_PER_JOB:,}",
+                })
+                return
+            values["max_vvip_accounts_per_job"] = str(max_vvip_accounts_per_job)
         if not values:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không có cấu hình để lưu"})
             return
@@ -2546,13 +2613,23 @@ class MasterHandler(BaseHTTPRequestHandler):
                     except Exception as exc:
                         indexed_results[index] = {**targets[index], "online": False, "health": {}, "error": str(exc)[:300]}
         results = [indexed_results[index] for index in range(len(targets))]
+        def active_chunks(item: dict[str, Any]) -> int:
+            try:
+                return max(0, int((item.get("health") or {}).get("chunks_active") or 0))
+            except (TypeError, ValueError):
+                return 0
+
         self._json(HTTPStatus.OK, {
             "ok": True,
             "checked_at": _now(),
             "online": sum(1 for item in results if item.get("online")),
             "total": len(results),
+            "normal_total": sum(1 for item in results if item.get("expected_service_type") == "normal"),
+            "vvip_total": sum(1 for item in results if item.get("expected_service_type") == "vvip"),
             "normal_online": sum(1 for item in results if item.get("online") and item.get("expected_service_type") == "normal"),
             "vvip_online": sum(1 for item in results if item.get("online") and item.get("expected_service_type") == "vvip"),
+            "normal_active": sum(active_chunks(item) for item in results if item.get("expected_service_type") == "normal"),
+            "vvip_active": sum(active_chunks(item) for item in results if item.get("expected_service_type") == "vvip"),
             "satellites": results,
         })
 
@@ -2759,17 +2836,32 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         store = self.server.store
         is_admin = bool((auth or {}).get("is_admin"))
-        max_accounts_per_job = _max_accounts_per_job(store)
-        if not is_admin and len(parsed) > max_accounts_per_job:
+        # Resolve the queue before admission checks so normal and VVIP limits
+        # remain completely independent. Admin defaults to the VVIP queue.
+        default_billing_mode = "vvip" if is_admin else "quantity"
+        billing_mode = str(body.get("billing_mode") or default_billing_mode).strip().lower()
+        if billing_mode not in {"quantity", "time", "vvip"}:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "billing_mode phải là quantity, time hoặc vvip"})
+            return
+        requested_billing_mode = billing_mode
+        queue_type = "vvip" if requested_billing_mode == "vvip" else "normal"
+        max_accounts_per_job = (
+            _max_vvip_accounts_per_job(store)
+            if queue_type == "vvip"
+            else _max_accounts_per_job(store)
+        )
+        account_limit_applies = queue_type == "vvip" or not is_admin
+        if account_limit_applies and len(parsed) > max_accounts_per_job:
             self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
                 "ok": False,
-                "code": "ACCOUNT_LIMIT_REACHED",
+                "code": "VVIP_ACCOUNT_LIMIT_REACHED" if queue_type == "vvip" else "ACCOUNT_LIMIT_REACHED",
                 "error": (
-                    f"Mỗi job được gửi tối đa {max_accounts_per_job:,} tài khoản. "
+                    f"Mỗi job {'VVIP ' if queue_type == 'vvip' else ''}được gửi tối đa {max_accounts_per_job:,} tài khoản. "
                     f"Danh sách hiện có {len(parsed):,} tài khoản."
                 ),
                 "submitted_accounts": len(parsed),
                 "max_accounts_per_job": max_accounts_per_job,
+                "queue_type": queue_type,
             })
             return
         # Cố định 15 account/chunk; không nhận cấu hình từ client.
@@ -2792,15 +2884,6 @@ class MasterHandler(BaseHTTPRequestHandler):
         owner_user_id = int((auth or {}).get("user_id") or 0)
         owner_email = str((auth or {}).get("email") or "")
         owner_name = str((auth or {}).get("name") or "")
-        # Admin jobs use the isolated VVIP queue unless the admin explicitly
-        # selects another billing mode. Regular users keep quantity as default.
-        default_billing_mode = "vvip" if is_admin else "quantity"
-        billing_mode = str(body.get("billing_mode") or default_billing_mode).strip().lower()
-        if billing_mode not in {"quantity", "time", "vvip"}:
-            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "billing_mode phải là quantity, time hoặc vvip"})
-            return
-        requested_billing_mode = billing_mode
-        queue_type = "vvip" if requested_billing_mode == "vvip" else "normal"
         block_count = 1
         raw_block_count = body.get("block_count", 1)
         if isinstance(raw_block_count, bool) or not isinstance(raw_block_count, int):
@@ -2843,18 +2926,23 @@ class MasterHandler(BaseHTTPRequestHandler):
                     "max_running_jobs_per_user": 1,
                 })
                 return
-            max_running_jobs = _max_running_jobs(store)
-            running_jobs = _running_job_count(store)
+            max_running_jobs = (
+                _max_vvip_running_jobs(store)
+                if queue_type == "vvip"
+                else _max_running_jobs(store)
+            )
+            running_jobs = _running_job_count(store, queue_type)
             if running_jobs >= max_running_jobs:
                 self._json(HTTPStatus.TOO_MANY_REQUESTS, {
                     "ok": False,
-                    "code": "JOB_LIMIT_REACHED",
+                    "code": "VVIP_JOB_LIMIT_REACHED" if queue_type == "vvip" else "JOB_LIMIT_REACHED",
                     "error": (
-                        f"Hệ thống đang chạy tối đa {max_running_jobs} job. "
+                        f"Hàng đợi {'VVIP' if queue_type == 'vvip' else 'thường'} đang chạy tối đa {max_running_jobs} job. "
                         "Vui lòng chờ một job hoàn tất hoặc dừng bớt job rồi thử lại."
                     ),
                     "running_jobs": running_jobs,
                     "max_running_jobs": max_running_jobs,
+                    "queue_type": queue_type,
                 })
                 return
             try:
@@ -3732,11 +3820,10 @@ class MasterHandler(BaseHTTPRequestHandler):
 class CoordinatorServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], store: Store, master_token: str, vvip_master_token: str = "") -> None:
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], store: Store, master_token: str) -> None:
         super().__init__(address, handler)
         self.store = store
         self.master_token = master_token
-        self.vvip_master_token = vvip_master_token
         self.claim_lock = threading.Lock()
         self.job_creation_lock = threading.Lock()
         self.stop_lock = threading.Lock()
@@ -4031,7 +4118,7 @@ def main() -> int:
             store = LocalStore(db_path)
             db_label = f"sqlite={db_path}"
 
-    server = CoordinatorServer((host, port), MasterHandler, store, token, VVIP_MASTER_TOKEN)
+    server = CoordinatorServer((host, port), MasterHandler, store, token)
     resumed_stops = server.resume_stopping_jobs()
     if resumed_stops:
         print(f"[master] resuming {resumed_stops} unfinished stop request(s)", flush=True)
@@ -4070,10 +4157,6 @@ def main() -> int:
         print(f"[master] MASTER_TOKEN = '{token[:4]}***{token[-2:]}' (len={len(token)})")
     else:
         print("[master] CẢNH BÁO: chưa đặt MASTER_TOKEN - các vệ tinh đều truy cập được. Hãy đặt trên Render.")
-    if VVIP_MASTER_TOKEN:
-        print(f"[master] VVIP_MASTER_TOKEN configured (len={len(VVIP_MASTER_TOKEN)})")
-    else:
-        print("[master] CẢNH BÁO: chưa đặt VVIP_MASTER_TOKEN - service VVIP chưa thể claim job.")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

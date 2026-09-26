@@ -11,8 +11,6 @@ services:
         value: 3.13.4
       - key: MASTER_TOKEN
         sync: false
-      - key: VVIP_MASTER_TOKEN
-        sync: false
       - key: AOVSHOP_API_URL
         sync: false
       - key: CHECKPASS_SERVICE_TOKEN

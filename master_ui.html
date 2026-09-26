@@ -2059,6 +2059,7 @@ let jobsLoading = false;
 let isAdminKey = false;
 let canCreateJobs = false;
 let maxAccountsPerJob = null;
+let maxVvipAccountsPerJob = null;
 let currentRawRows = [];
 let currentFilter = 'all';
 let currentSearch = '';
@@ -2282,7 +2283,7 @@ function applyBillingMode(mode) {
   if (timeWrap) {
     timeWrap.style.display = ((mode === 'time' || mode === 'vvip') && !hasActiveEntitlement && !isAdminKey) ? 'block' : 'none';
   }
-  scheduleQuote();
+  updateAccountCounter();
 }
 
 function showSubmitModalBox() {
@@ -2342,10 +2343,12 @@ function updateAccountCounter() {
   }) : [];
   const el = document.getElementById('accCounter');
   if (el) {
-    const overLimit = !isAdminKey && Number.isInteger(maxAccountsPerJob) && lines.length > maxAccountsPerJob;
+    const selectedMode = selectedBillingMode();
+    const activeLimit = selectedMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
+    const overLimit = Number.isInteger(activeLimit) && lines.length > activeLimit;
     el.textContent = formatNumber(lines.length) + (
-      !isAdminKey && Number.isInteger(maxAccountsPerJob)
-        ? ' / ' + formatNumber(maxAccountsPerJob) + ' tài khoản'
+      Number.isInteger(activeLimit)
+        ? ' / ' + formatNumber(activeLimit) + (selectedMode === 'vvip' ? ' tài khoản VVIP' : ' tài khoản')
         : ' tài khoản'
     );
     el.style.color = overLimit ? 'var(--danger)' : '';
@@ -2456,6 +2459,8 @@ async function loadSession(loadJobsAfter = true) {
     canCreateJobs = true;
     const configuredLimit = Number(data.max_accounts_per_job);
     maxAccountsPerJob = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : null;
+    const configuredVvipLimit = Number(data.max_vvip_accounts_per_job);
+    maxVvipAccountsPerJob = Number.isInteger(configuredVvipLimit) && configuredVvipLimit > 0 ? configuredVvipLimit : null;
     setCreateJobAvailability(true);
     setClearAllButton(isAdminKey);
     updateOwnerBadge();
@@ -2582,12 +2587,13 @@ async function sendJob() {
     const value = line.trim();
     return value.length > 0 && !value.startsWith('#');
   }).length;
-  if (!isAdminKey && Number.isInteger(maxAccountsPerJob) && accountCount > maxAccountsPerJob) {
-    toast('❌ Mỗi job chỉ được gửi tối đa ' + formatNumber(maxAccountsPerJob) + ' tài khoản');
+  const billingMode = selectedBillingMode();
+  const activeAccountLimit = billingMode === 'vvip' ? maxVvipAccountsPerJob : (!isAdminKey ? maxAccountsPerJob : null);
+  if (Number.isInteger(activeAccountLimit) && accountCount > activeAccountLimit) {
+    toast('❌ Mỗi job ' + (billingMode === 'vvip' ? 'VVIP ' : '') + 'chỉ được gửi tối đa ' + formatNumber(activeAccountLimit) + ' tài khoản');
     return;
   }
   const btn = document.getElementById('btnSend');
-  const billingMode = selectedBillingMode();
   const blockCount = Math.max(1, Math.min(48, Number(document.getElementById('blockCount')?.value || 1)));
   const quote = document.getElementById('billingQuote');
   if (quote?.dataset.affordable === '0') {
