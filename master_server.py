@@ -1330,26 +1330,15 @@ def parse_accounts(text: str) -> list[ParsedAccount]:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        if "|" in line:
-            parts = line.split("|")
-            if len(parts) < 2:
-                raise _account_line_error(
-                    line_number,
-                    raw,
-                    "cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)",
-                )
-            account = parts[0].strip()
-            password = parts[1].strip()
-        elif line.count(":") == 1:
-            account, password = line.split(":", 1)
-            account = account.strip()
-            password = password.strip()
-        else:
+        parts = re.split(r"[|:]", line)
+        if len(parts) < 2:
             raise _account_line_error(
                 line_number,
                 raw,
-                "cần định dạng user|pass, user|pass|mail hoặc user|pass|mail|passmail (hoặc user:pass)",
+                "cần có dấu : hoặc | để tách tài khoản và mật khẩu",
             )
+        account = parts[0].strip()
+        password = parts[1].strip()
         if not account or not password or len(account) > 128 or len(password) > 1024:
             raise _account_line_error(
                 line_number,
