@@ -49,6 +49,8 @@ DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
 QUANTITY_FAIL_PRICE_TENTHS = 1
+TIME_BLOCK_PRICE_TENTHS = 50_000
+VVIP_BLOCK_PRICE_TENTHS = 100_000
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
 STOP_FINALIZE_BATCH_SIZE = 250
@@ -61,6 +63,7 @@ if MAX_CHECKPASS_TIME_BLOCKS < 1:
     MAX_CHECKPASS_TIME_BLOCKS = 48
 AOVSHOP_API_URL = os.environ.get("AOVSHOP_API_URL", "").strip().rstrip("/")
 CHECKPASS_SERVICE_TOKEN = os.environ.get("CHECKPASS_SERVICE_TOKEN", "").strip()
+VVIP_MASTER_TOKEN = os.environ.get("VVIP_MASTER_TOKEN", "").strip()
 SP1S_FRONTEND_URL = os.environ.get("SP1S_FRONTEND_URL", "https://sp1s.shop").strip().rstrip("/")
 CHECKPASS_PUBLIC_URL = os.environ.get("CHECKPASS_PUBLIC_URL", "").strip().rstrip("/")
 LICENSE_CACHE_TTL = 300  # giây cache kết quả verify license
@@ -84,6 +87,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     owner_email TEXT DEFAULT '',
     owner_name TEXT DEFAULT '',
     billing_mode TEXT DEFAULT '',
+    queue_type TEXT NOT NULL DEFAULT 'normal',
     billing_state TEXT DEFAULT 'none',
     external_job_reference TEXT DEFAULT '',
     unit_price_tenths INTEGER DEFAULT 0,
@@ -168,6 +172,7 @@ CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_job_id ON results(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>'';
 CREATE INDEX IF NOT EXISTS idx_web_sessions_expiry ON web_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_billing_outbox_retry ON billing_outbox(status,next_retry_at);
@@ -188,6 +193,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     owner_email TEXT DEFAULT '',
     owner_name TEXT DEFAULT '',
     billing_mode TEXT DEFAULT '',
+    queue_type TEXT NOT NULL DEFAULT 'normal',
     billing_state TEXT DEFAULT 'none',
     external_job_reference TEXT DEFAULT '',
     unit_price_tenths INTEGER DEFAULT 0,
@@ -272,6 +278,7 @@ CREATE INDEX IF NOT EXISTS idx_results_job ON results(job_id);
 CREATE INDEX IF NOT EXISTS idx_results_job_id ON results(job_id, id);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner ON jobs(owner_hash);
 CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id);
+CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>'';
 CREATE INDEX IF NOT EXISTS idx_web_sessions_expiry ON web_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_billing_outbox_retry ON billing_outbox(status,next_retry_at);
@@ -283,6 +290,7 @@ _SQLITE_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN owner_email TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN owner_name TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN billing_mode TEXT DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN queue_type TEXT NOT NULL DEFAULT 'normal'",
     "ALTER TABLE jobs ADD COLUMN billing_state TEXT DEFAULT 'none'",
     "ALTER TABLE jobs ADD COLUMN external_job_reference TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN unit_price_tenths INTEGER DEFAULT 0",
@@ -295,6 +303,7 @@ _SQLITE_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN billing_error TEXT DEFAULT ''",
     "ALTER TABLE web_sessions ADD COLUMN is_admin INTEGER DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>''",
 )
 
@@ -303,6 +312,7 @@ _POSTGRES_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_email TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS owner_name TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billing_mode TEXT DEFAULT ''",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS queue_type TEXT NOT NULL DEFAULT 'normal'",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billing_state TEXT DEFAULT 'none'",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS external_job_reference TEXT DEFAULT ''",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS unit_price_tenths INTEGER DEFAULT 0",
@@ -315,6 +325,7 @@ _POSTGRES_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billing_error TEXT DEFAULT ''",
     "ALTER TABLE web_sessions ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
     "CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>''",
 )
 
@@ -1354,7 +1365,7 @@ def split_chunks(accounts: list[ParsedAccount], chunk_size: int) -> list[list[Pa
     return [accounts[i : i + chunk_size] for i in range(0, len(accounts), chunk_size)]
 
 
-def select_fair_claim_candidate(store: Any, now: float, satellite_id: str) -> tuple | None:
+def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue_type: str = "normal") -> tuple | None:
     """Select one eligible chunk from the open job with the fewest active chunks.
 
     Choosing a chunk globally would make a job's claim probability proportional
@@ -1370,7 +1381,8 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str) -> tu
             FROM chunks AS c
             JOIN jobs AS j ON j.id=c.job_id
             WHERE j.status='open'
-              AND (j.billing_mode<>'time' OR j.access_until IS NULL OR j.access_until>?)
+              AND COALESCE(j.queue_type,'normal')=?
+              AND (j.billing_mode NOT IN ('time','vvip') OR j.access_until IS NULL OR j.access_until>?)
               AND (
                   c.status='pending'
                   OR (c.status='claimed' AND c.lease_until IS NOT NULL AND c.lease_until < ?)
@@ -1387,7 +1399,7 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str) -> tu
         ORDER BY COALESCE(active.active_count, 0) ASC, available.job_id ASC
         LIMIT 1
         """,
-        (now, now, satellite_id, now),
+        (queue_type, now, now, satellite_id, now),
     )
     if selected_job is None:
         return None
@@ -1422,6 +1434,7 @@ DEFAULT_NOTICE_BODY = (
     "để tránh nghẽn tiến trình."
 )
 DEFAULT_SATELLITE_TARGETS = "[checkpass3] https://checkpass3-wt3z.onrender.com/\n"
+DEFAULT_VVIP_SATELLITE_TARGETS = ""
 
 
 def _setting(store: Any, key: str, default: str = "") -> str:
@@ -1684,7 +1697,16 @@ def fetch_satellite_health(target: dict[str, str]) -> dict[str, Any]:
             data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("Health không trả JSON object")
-        result.update({"online": bool(data.get("ok")), "health": data, "error": ""})
+        expected_type = str(target.get("expected_service_type") or "normal")
+        actual_type = str(data.get("service_type") or "normal").lower()
+        type_mismatch = actual_type != expected_type
+        result.update({
+            "online": bool(data.get("ok")),
+            "health": data,
+            "actual_service_type": actual_type,
+            "type_mismatch": type_mismatch,
+            "error": f"Service trả loại {actual_type}, cấu hình là {expected_type}" if type_mismatch else "",
+        })
     except urllib.error.HTTPError as exc:
         body = exc.read(300).decode("utf-8", "replace")
         result.update({"online": False, "health": {}, "error": f"HTTP {exc.code}: {body}"[:300]})
@@ -1899,27 +1921,33 @@ class MasterHandler(BaseHTTPRequestHandler):
         self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "Vui lòng đăng nhập bằng tài khoản SP1S", "login_url": "/auth/login"})
         return None
 
-    def _require_satellite(self) -> dict[str, Any] | None:
-        """Vệ tinh chỉ dùng MASTER_TOKEN; tài khoản SP1S không có quyền claim/report."""
-        master_token = self.server.master_token or ""
-        if not master_token:
+    def _require_satellite(self, expected_queue: str | None = None) -> dict[str, Any] | None:
+        """Authenticate a normal or VVIP satellite and bind it to its queue."""
+        normal_token = (self.server.master_token or "").strip()
+        vvip_token = (self.server.vvip_master_token or "").strip()
+        if expected_queue == "vvip" and not vvip_token:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "VVIP_MASTER_TOKEN chưa được cấu hình"})
+            return None
+        if not normal_token and expected_queue != "vvip":
             if _aovshop_requested() or _aovshop_configured():
                 self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "MASTER_TOKEN chưa được cấu hình"})
                 return None
             # Không đặt MASTER_TOKEN → cho phép mọi vệ tinh (tương thích cũ, tránh chặn)
-            return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "", "token": ""}
+            return {"authorized": True, "is_admin": True, "is_satellite": True, "queue_type": "normal", "owner_hash": "", "owner_preview": "", "token": ""}
         token = self._extract_token()
         if not token:
-            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "thiếu token vệ tinh (cần MASTER_TOKEN trong header Authorization)"})
+            self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "thiếu token vệ tinh trong header Authorization"})
             return None
-        # So sánh an toàn — strip whitespace để tránh lỗi do copy/paste
         token_clean = token.strip()
-        master_clean = master_token.strip()
-        if token_clean and master_clean and secrets.compare_digest(token_clean, master_clean):
-            return {"authorized": True, "is_admin": True, "is_satellite": True, "owner_hash": "", "owner_preview": "admin", "token": token}
-        # Debug: log để dễ phát hiện mismatch
-        print(f"[master] satellite auth FAIL: token_len={len(token_clean)} master_len={len(master_clean)} match={token_clean == master_clean}", flush=True)
-        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ (MASTER_TOKEN không khớp)"})
+        matched_queue = ""
+        if token_clean and normal_token and secrets.compare_digest(token_clean, normal_token):
+            matched_queue = "normal"
+        elif token_clean and vvip_token and secrets.compare_digest(token_clean, vvip_token):
+            matched_queue = "vvip"
+        if matched_queue and (expected_queue is None or matched_queue == expected_queue):
+            return {"authorized": True, "is_admin": matched_queue == "normal", "is_satellite": True, "queue_type": matched_queue, "owner_hash": "", "owner_preview": matched_queue, "token": token}
+        print(f"[master] satellite auth FAIL: expected={expected_queue or 'any'} token_len={len(token_clean)}", flush=True)
+        self._json(HTTPStatus.UNAUTHORIZED, {"ok": False, "error": "token vệ tinh không hợp lệ hoặc không đúng loại service"})
         return None
 
     def _require_admin(self) -> dict[str, Any] | None:
@@ -2011,6 +2039,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.OK, {
                     "ok": True, "role": "master", "now": _now(),
                     "master_token_configured": bool(mt),
+                    "vvip_master_token_configured": bool(self.server.vvip_master_token),
                     "license_url": lu[:60] if lu and not _aovshop_configured() else "disabled",
                     "sp1s_sso": _aovshop_configured(),
                 })
@@ -2292,10 +2321,16 @@ class MasterHandler(BaseHTTPRequestHandler):
                 self._handle_stop_job(job_id, auth)
                 return
             if path == "/api/claim":
-                auth = self._require_satellite()
+                auth = self._require_satellite("normal")
                 if auth is None:
                     return
-                self._handle_claim()
+                self._handle_claim("normal")
+                return
+            if path == "/api/vvip/claim":
+                auth = self._require_satellite("vvip")
+                if auth is None:
+                    return
+                self._handle_claim("vvip")
                 return
             if path == "/api/heartbeat":
                 auth = self._require_satellite()
@@ -2366,6 +2401,7 @@ class MasterHandler(BaseHTTPRequestHandler):
     def _handle_admin_settings_get(self) -> None:
         store = self.server.store
         targets_text = _setting(store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+        vvip_targets_text = _setting(store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
         max_running_jobs = _max_running_jobs(store)
         max_accounts_per_job = _max_accounts_per_job(store)
         running_jobs = _running_job_count(store)
@@ -2374,6 +2410,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             "notice": _notice_payload(store),
             "satellite_targets": targets_text,
             "satellite_count": len(parse_satellite_targets(targets_text)),
+            "vvip_satellite_targets": vvip_targets_text,
+            "vvip_satellite_count": len(parse_satellite_targets(vvip_targets_text)),
             "max_running_jobs": max_running_jobs,
             "max_accounts_per_job": max_accounts_per_job,
             "running_jobs": running_jobs,
@@ -2387,6 +2425,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             return
         notice = body.get("notice")
         targets_value = body.get("satellite_targets")
+        vvip_targets_value = body.get("vvip_satellite_targets")
         max_running_value = body.get("max_running_jobs")
         max_accounts_value = body.get("max_accounts_per_job")
         values: dict[str, str] = {}
@@ -2431,6 +2470,14 @@ class MasterHandler(BaseHTTPRequestHandler):
                 return
             normalized = "\n".join(f"[{target['label']}] {target['url']}" for target in targets)
             values["satellite_targets"] = normalized + ("\n" if normalized else "")
+        if vvip_targets_value is not None:
+            targets_text = str(vvip_targets_value).strip()
+            targets = parse_satellite_targets(targets_text)
+            if targets_text and not targets:
+                self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "không tìm thấy URL VVIP http/https hợp lệ"})
+                return
+            normalized = "\n".join(f"[{target['label']}] {target['url']}" for target in targets)
+            values["vvip_satellite_targets"] = normalized + ("\n" if normalized else "")
         if max_running_value is not None:
             try:
                 if isinstance(max_running_value, bool):
@@ -2478,7 +2525,16 @@ class MasterHandler(BaseHTTPRequestHandler):
         targets_text = str(body.get("satellite_targets") or "").strip()
         if not targets_text:
             targets_text = _setting(self.server.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
-        targets = parse_satellite_targets(targets_text)
+        vvip_targets_text = str(body.get("vvip_satellite_targets") or "").strip()
+        if not vvip_targets_text:
+            vvip_targets_text = _setting(self.server.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
+        targets = [
+            {**target, "expected_service_type": "normal"}
+            for target in parse_satellite_targets(targets_text)
+        ] + [
+            {**target, "expected_service_type": "vvip"}
+            for target in parse_satellite_targets(vvip_targets_text)
+        ]
         indexed_results: dict[int, dict[str, Any]] = {}
         if targets:
             with ThreadPoolExecutor(max_workers=min(12, len(targets))) as pool:
@@ -2495,6 +2551,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             "checked_at": _now(),
             "online": sum(1 for item in results if item.get("online")),
             "total": len(results),
+            "normal_online": sum(1 for item in results if item.get("online") and item.get("expected_service_type") == "normal"),
+            "vvip_online": sum(1 for item in results if item.get("online") and item.get("expected_service_type") == "vvip"),
             "satellites": results,
         })
 
@@ -2593,7 +2651,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "SELECT j.id,j.created_at,j.total,j.chunk_size,j.status,j.finished_at,j.owner_preview,"
             "COALESCE(s.result_count,0),COALESCE(s.ok_count,0),COALESCE(s.fail_count,0),"
             "COALESCE(s.uncheckable_count,0),j.billing_mode,j.billing_state,j.estimated_amount_tenths,"
-            "j.final_amount_tenths,j.access_until,j.billing_order_id,j.owner_email "
+            "j.final_amount_tenths,j.access_until,j.billing_order_id,j.owner_email,j.queue_type "
             "FROM jobs j LEFT JOIN job_stats s ON s.job_id=j.id "
         )
         if is_admin:
@@ -2632,6 +2690,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 "final_amount": _money_from_tenths(row[14]),
                 "access_until": row[15],
                 "billing_order_id": row[16],
+                "queue_type": row[18] or "normal",
             })
         self._json(HTTPStatus.OK, {"ok": True, "jobs": jobs, "overview": overview})
 
@@ -2659,14 +2718,14 @@ class MasterHandler(BaseHTTPRequestHandler):
                     if submitted < 1 or submitted > _max_accounts_per_job(self.server.store):
                         raise ValueError("Số lượng tài khoản không hợp lệ")
                 payload = {"mode": "quantity", "user_id": user_id, "submitted_count": submitted}
-            elif mode == "time":
+            elif mode in {"time", "vvip"}:
                 raw_blocks = body.get("block_count", 1)
                 if isinstance(raw_blocks, bool) or not isinstance(raw_blocks, int):
                     raise ValueError("Số block phải là số nguyên")
                 blocks = raw_blocks
                 if not 1 <= blocks <= MAX_CHECKPASS_TIME_BLOCKS:
                     raise ValueError(f"Số block phải từ 1 đến {MAX_CHECKPASS_TIME_BLOCKS}")
-                payload = {"mode": "time", "user_id": user_id, "block_count": blocks}
+                payload = {"mode": mode, "user_id": user_id, "block_count": blocks}
             else:
                 raise ValueError("Chế độ thanh toán không hợp lệ")
             result = _aovshop_request("/api/integrations/checkpass/quote", payload)
@@ -2734,9 +2793,11 @@ class MasterHandler(BaseHTTPRequestHandler):
         owner_email = str((auth or {}).get("email") or "")
         owner_name = str((auth or {}).get("name") or "")
         billing_mode = str(body.get("billing_mode") or "quantity").strip().lower()
-        if billing_mode not in {"quantity", "time"}:
-            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "billing_mode phải là quantity hoặc time"})
+        if billing_mode not in {"quantity", "time", "vvip"}:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "billing_mode phải là quantity, time hoặc vvip"})
             return
+        requested_billing_mode = billing_mode
+        queue_type = "vvip" if requested_billing_mode == "vvip" else "normal"
         block_count = 1
         raw_block_count = body.get("block_count", 1)
         if isinstance(raw_block_count, bool) or not isinstance(raw_block_count, int):
@@ -2824,15 +2885,17 @@ class MasterHandler(BaseHTTPRequestHandler):
                         )
                         hold_reference = external_reference
                     else:
+                        service_tier = "vvip" if billing_mode == "vvip" else "normal"
                         billing_result = _aovshop_request("/api/integrations/checkpass/time/activate", {
                             "user_id": owner_user_id,
                             "external_job_reference": external_reference,
                             "block_count": block_count,
                             "idempotency_key": f"time:{external_reference}",
                             "extend": False,
+                            "service_tier": service_tier,
                         })
                         billing_state = "settled" if billing_result.get("charged") else "covered_by_time"
-                        unit_price_tenths = 50_000
+                        unit_price_tenths = VVIP_BLOCK_PRICE_TENTHS if service_tier == "vvip" else TIME_BLOCK_PRICE_TENTHS
                         estimated_amount_tenths = int(
                             billing_result.get("amount_tenths")
                             if billing_result.get("amount_tenths") is not None
@@ -2849,10 +2912,10 @@ class MasterHandler(BaseHTTPRequestHandler):
                 # Giữ job ở trạng thái trung gian cho tới khi toàn bộ chunk đã lưu.
                 # Vệ tinh và _check_finish_all_jobs chỉ xử lý job "open".
                 job_id = store.exec(
-                    "INSERT INTO jobs (created_at,total,chunk_size,status,owner_hash,owner_preview,owner_user_id,owner_email,owner_name,billing_mode,billing_state,external_job_reference,unit_price_tenths,estimated_amount_tenths,hold_reference,entitlement_id,access_until) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO jobs (created_at,total,chunk_size,status,owner_hash,owner_preview,owner_user_id,owner_email,owner_name,billing_mode,queue_type,billing_state,external_job_reference,unit_price_tenths,estimated_amount_tenths,hold_reference,entitlement_id,access_until) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         _now(), len(parsed), chunk_size, "creating", owner_hash, owner_preview,
-                        owner_user_id or None, owner_email, owner_name, billing_mode, billing_state,
+                        owner_user_id or None, owner_email, owner_name, billing_mode, queue_type, billing_state,
                         external_reference, unit_price_tenths, estimated_amount_tenths,
                         hold_reference, entitlement_id, access_until,
                     ),
@@ -2904,6 +2967,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "chunks": len(chunks),
             "chunk_size": chunk_size,
             "billing_mode": billing_mode,
+            "queue_type": queue_type,
             "billing_state": billing_state,
             "estimated_amount": _money_from_tenths(estimated_amount_tenths),
             "access_until": access_until,
@@ -2954,7 +3018,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         """Persist a terminal result for accounts in chunks interrupted by Stop."""
         return _finalize_unresolved_job_accounts(self.server.store, job_id, now)
 
-    def _handle_claim(self) -> None:
+    def _handle_claim(self, queue_type: str = "normal") -> None:
         try:
             body = self._read_json()
         except ValueError as exc:
@@ -2978,7 +3042,7 @@ class MasterHandler(BaseHTTPRequestHandler):
         # UPDATE remains as protection when multiple master processes share a DB.
         with self.server.claim_lock:
             for _ in range(3):
-                row = select_fair_claim_candidate(store, now, satellite_id)
+                row = select_fair_claim_candidate(store, now, satellite_id, queue_type)
                 if row is None:
                     break
                 chunk_id, job_id, account_data = row
@@ -3003,6 +3067,7 @@ class MasterHandler(BaseHTTPRequestHandler):
                 claim_payload = {
                     "chunk_id": chunk_id,
                     "job_id": job_id,
+                    "queue_type": queue_type,
                     "lease_until": now + lease_minutes * 60,
                     "accounts": accounts,
                 }
@@ -3290,7 +3355,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "COALESCE(s.result_count,0), COALESCE(s.ok_count,0), "
             "COALESCE(s.fail_count,0),COALESCE(s.uncheckable_count,0),"
             "j.billing_mode,j.billing_state,j.estimated_amount_tenths,j.final_amount_tenths,"
-            "j.access_until,j.billing_order_id,j.owner_email "
+            "j.access_until,j.billing_order_id,j.owner_email,j.queue_type "
             "FROM jobs j LEFT JOIN job_stats s ON s.job_id=j.id WHERE j.id=?",
             (job_id,),
         )
@@ -3319,6 +3384,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "access_until": summary[20],
             "billing_order_id": summary[21],
             "owner_email": summary[22] or "",
+            "queue_type": summary[23] or "normal",
             "chunks": {"pending": pending, "claimed": claimed, "done": done},
             "results": {
                 "count": results_count,
@@ -3663,10 +3729,11 @@ class MasterHandler(BaseHTTPRequestHandler):
 class CoordinatorServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], store: Store, master_token: str) -> None:
+    def __init__(self, address: tuple[str, int], handler: type[BaseHTTPRequestHandler], store: Store, master_token: str, vvip_master_token: str = "") -> None:
         super().__init__(address, handler)
         self.store = store
         self.master_token = master_token
+        self.vvip_master_token = vvip_master_token
         self.claim_lock = threading.Lock()
         self.job_creation_lock = threading.Lock()
         self.stop_lock = threading.Lock()
@@ -3860,7 +3927,7 @@ class CoordinatorServer(ThreadingHTTPServer):
             try:
                 now = _now()
                 expired = self.store.fetch(
-                    "SELECT id FROM jobs WHERE status='open' AND billing_mode='time' "
+                    "SELECT id FROM jobs WHERE status='open' AND billing_mode IN ('time','vvip') "
                     "AND access_until IS NOT NULL AND access_until<=?",
                     (now,),
                 )
@@ -3961,7 +4028,7 @@ def main() -> int:
             store = LocalStore(db_path)
             db_label = f"sqlite={db_path}"
 
-    server = CoordinatorServer((host, port), MasterHandler, store, token)
+    server = CoordinatorServer((host, port), MasterHandler, store, token, VVIP_MASTER_TOKEN)
     resumed_stops = server.resume_stopping_jobs()
     if resumed_stops:
         print(f"[master] resuming {resumed_stops} unfinished stop request(s)", flush=True)
@@ -4000,6 +4067,10 @@ def main() -> int:
         print(f"[master] MASTER_TOKEN = '{token[:4]}***{token[-2:]}' (len={len(token)})")
     else:
         print("[master] CẢNH BÁO: chưa đặt MASTER_TOKEN - các vệ tinh đều truy cập được. Hãy đặt trên Render.")
+    if VVIP_MASTER_TOKEN:
+        print(f"[master] VVIP_MASTER_TOKEN configured (len={len(VVIP_MASTER_TOKEN)})")
+    else:
+        print("[master] CẢNH BÁO: chưa đặt VVIP_MASTER_TOKEN - service VVIP chưa thể claim job.")
     try:
         server.serve_forever(poll_interval=0.5)
     except KeyboardInterrupt:

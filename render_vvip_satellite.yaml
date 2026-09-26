@@ -1,10 +1,10 @@
 services:
   - type: web
-    name: garena-satellite
+    name: service-litesel-vvip
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: python service-litesel.py
+    startCommand: python service-liteselVVIP.py
     healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
@@ -13,10 +13,10 @@ services:
         value: "2"
       - key: MASTER_URL
         value: "https://checkpass-4grp.onrender.com"
-      - key: MASTER_TOKEN
+      - key: VVIP_MASTER_TOKEN
         sync: false
       - key: SATELLITE_ID
-        value: render-satellite-1
+        value: render-vvip-satellite-1
       - key: WORKERS
         value: "1"
       - key: CONCURRENT_CHUNKS

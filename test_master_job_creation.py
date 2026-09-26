@@ -116,7 +116,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.inner = LocalStore(Path(self.temp_dir.name) / "master-test.db")
         self.store = _BlockingCreateStore(self.inner)
-        self.server = CoordinatorServer(("127.0.0.1", 0), MasterHandler, self.store, "secret")
+        self.server = CoordinatorServer(("127.0.0.1", 0), MasterHandler, self.store, "secret", "vvip-secret")
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()
         self.base_url = f"http://127.0.0.1:{self.server.server_port}"
@@ -228,6 +228,55 @@ class JobCreationRaceTest(unittest.TestCase):
         status, claim = self.post("/api/claim", {"satellite_id": "race-satellite"})
         self.assertEqual(status, 200)
         self.assertEqual(claim["claim"]["job_id"], job_id)
+
+    def test_normal_and_vvip_satellites_claim_only_their_own_queue(self) -> None:
+        normal_job = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type) VALUES (?,?,?,?,?)",
+            (1, 1, 15, "open", "normal"),
+        )
+        vvip_job = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type) VALUES (?,?,?,?,?)",
+            (2, 1, 15, "open", "vvip"),
+        )
+        self.inner.exec("INSERT INTO chunks (job_id,idx,account) VALUES (?,?,?)", (normal_job, 0, '["normal|pass"]'))
+        self.inner.exec("INSERT INTO chunks (job_id,idx,account) VALUES (?,?,?)", (vvip_job, 0, '["vvip|pass"]'))
+
+        status, normal_claim = self.post("/api/claim", {"satellite_id": "normal-satellite"})
+        self.assertEqual(status, 200)
+        self.assertEqual(normal_claim["claim"]["job_id"], normal_job)
+        self.assertEqual(normal_claim["claim"]["queue_type"], "normal")
+
+        denied_status, _ = self.post_error(
+            "/api/vvip/claim", {"satellite_id": "fake-vvip"}, token="secret"
+        )
+        self.assertEqual(denied_status, 401)
+
+        status, vvip_claim = self.post(
+            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="vvip-secret"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(vvip_claim["claim"]["job_id"], vvip_job)
+        self.assertEqual(vvip_claim["claim"]["queue_type"], "vvip")
+
+    def test_vvip_billing_option_creates_a_vvip_queue_job(self) -> None:
+        self.store.block_once = False
+        status, created = self.post(
+            "/api/jobs",
+            {"text": "vvip-user|pass", "billing_mode": "vvip", "block_count": 1},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(created["queue_type"], "vvip")
+        job = self.inner.fetchone(
+            "SELECT billing_mode,queue_type FROM jobs WHERE id=?", (created["job_id"],)
+        )
+        self.assertEqual(job, ("admin", "vvip"))
+
+        _, normal_claim = self.post("/api/claim", {"satellite_id": "normal-satellite"})
+        self.assertIsNone(normal_claim["claim"])
+        _, vvip_claim = self.post(
+            "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="vvip-secret"
+        )
+        self.assertEqual(vvip_claim["claim"]["job_id"], created["job_id"])
 
     def test_open_job_without_chunks_is_not_completed(self) -> None:
         orphan_id = self.inner.exec(

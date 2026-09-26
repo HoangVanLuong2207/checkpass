@@ -1931,6 +1931,22 @@ table.data-table tbody tr:hover {
             </div>
           </div>
         </div>
+
+        <!-- Lựa chọn 3: VVIP -->
+        <div onclick="selectBillingModeAndProceed('vvip')" style="border:2px solid #ddd6fe;border-radius:12px;padding:16px;cursor:pointer;transition:all 0.2s;background:#faf5ff;display:flex;align-items:flex-start;gap:14px" onmouseover="this.style.borderColor='#7c3aed';this.style.background='#f3e8ff'" onmouseout="this.style.borderColor='#ddd6fe';this.style.background='#faf5ff'">
+          <div style="width:40px;height:40px;border-radius:10px;background:#ede9fe;color:#7c3aed;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0">
+            <i class="fa-solid fa-crown"></i>
+          </div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:center;justify-content:space-between">
+              <strong style="font-size:15px;color:#6d28d9">VVIP – Hàng đợi riêng</strong>
+              <span style="font-size:12px;font-weight:700;color:#7c3aed;background:#f5f3ff;padding:2px 8px;border-radius:6px;border:1px solid #c4b5fd">10.000đ / 30 phút</span>
+            </div>
+            <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
+              Không giới hạn tài khoản trong thời gian thuê. Job chỉ được xử lý bởi service VVIP chuyên dụng.
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     <div class="modal-footer" style="justify-content:flex-end">
@@ -2206,9 +2222,11 @@ function openSubmitModal() {
     return;
   }
   // Nếu là admin hoặc đã có quyền theo giờ đang active -> mở thẳng submitModal
-  const hasActiveEntitlement = Boolean(currentSession?.entitlement && currentSession.entitlement.id);
+  const normalEntitlement = currentSession?.entitlements?.normal || currentSession?.entitlement || null;
+  const vvipEntitlement = currentSession?.entitlements?.vvip || currentSession?.vvip_entitlement || null;
+  const hasActiveEntitlement = Boolean(normalEntitlement?.id || vvipEntitlement?.id);
   if (isAdminKey || hasActiveEntitlement) {
-    const defaultMode = hasActiveEntitlement ? 'time' : 'quantity';
+    const defaultMode = normalEntitlement?.id ? 'time' : (vvipEntitlement?.id ? 'vvip' : 'quantity');
     applyBillingMode(defaultMode);
     showSubmitModalBox();
     return;
@@ -2236,14 +2254,22 @@ function applyBillingMode(mode) {
 
   const banner = document.getElementById('selectedPlanBanner');
   const changeBtn = document.getElementById('btnChangeBillingMode');
-  const hasActiveEntitlement = Boolean(currentSession?.entitlement && currentSession.entitlement.id);
+  const normalEntitlement = currentSession?.entitlements?.normal || currentSession?.entitlement || null;
+  const vvipEntitlement = currentSession?.entitlements?.vvip || currentSession?.vvip_entitlement || null;
+  const selectedEntitlement = mode === 'vvip' ? vvipEntitlement : (mode === 'time' ? normalEntitlement : null);
+  const hasActiveEntitlement = Boolean(selectedEntitlement && selectedEntitlement.id);
 
   if (isAdminKey) {
-    if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-crown"></i> Gói Quản trị viên (Miễn phí hoàn toàn)</span>';
-    if (changeBtn) changeBtn.style.display = 'none';
+    const queueLabel = mode === 'vvip' ? ' · Hàng đợi VVIP' : ' · Hàng đợi thường';
+    if (banner) banner.innerHTML = '<span style="color:' + (mode === 'vvip' ? '#7c3aed' : '#16a34a') + '"><i class="fa-solid fa-crown"></i> Gói Quản trị viên (Miễn phí hoàn toàn)' + queueLabel + '</span>';
+    if (changeBtn) changeBtn.style.display = 'inline-flex';
   } else if (hasActiveEntitlement) {
-    if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-clock"></i> Đang có quyền theo giờ (Miễn phí tới ' + new Date(currentSession.entitlement.expires_at).toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'}) + ')</span>';
-    if (changeBtn) changeBtn.style.display = 'none';
+    const label = mode === 'vvip' ? 'VVIP' : 'theo giờ';
+    if (banner) banner.innerHTML = '<span style="color:' + (mode === 'vvip' ? '#7c3aed' : '#16a34a') + '"><i class="fa-solid fa-clock"></i> Đang có quyền ' + label + ' (miễn phí tới ' + new Date(selectedEntitlement.expires_at).toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'}) + ')</span>';
+    if (changeBtn) changeBtn.style.display = 'inline-flex';
+  } else if (mode === 'vvip') {
+    if (banner) banner.innerHTML = '<span style="color:#7c3aed"><i class="fa-solid fa-crown"></i> VVIP (10.000đ / block 30 phút - hàng đợi riêng)</span>';
+    if (changeBtn) changeBtn.style.display = 'inline-flex';
   } else if (mode === 'time') {
     if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-stopwatch"></i> Theo thời gian (5.000đ / block 30 phút - không giới hạn acc)</span>';
     if (changeBtn) changeBtn.style.display = 'inline-flex';
@@ -2254,7 +2280,7 @@ function applyBillingMode(mode) {
 
   const timeWrap = document.getElementById('timeBlockWrap');
   if (timeWrap) {
-    timeWrap.style.display = (mode === 'time' && !hasActiveEntitlement && !isAdminKey) ? 'block' : 'none';
+    timeWrap.style.display = ((mode === 'time' || mode === 'vvip') && !hasActiveEntitlement && !isAdminKey) ? 'block' : 'none';
   }
   scheduleQuote();
 }
@@ -2515,7 +2541,7 @@ async function refreshQuote() {
   try {
     const data = await api('/api/quote', {
       method: 'POST',
-      body: JSON.stringify(mode === 'time'
+      body: JSON.stringify(mode !== 'quantity'
         ? { mode, block_count: blockCount }
         : { mode, submitted_count: submittedCount })
     });
@@ -2526,7 +2552,7 @@ async function refreshQuote() {
     let message = data.mode === 'admin' || isAdminKey
       ? '<strong style="color:#047857"><i class="fa-solid fa-crown"></i> Quyền Quản trị viên: Miễn phí hoàn toàn, không giới hạn tài khoản.</strong>'
       : data.covered_by_time
-      ? '<strong style="color:#047857">Đang có quyền theo giờ: không trừ thêm tiền.</strong>'
+      ? '<strong style="color:#047857">Đang có quyền ' + (mode === 'vvip' ? 'VVIP' : 'theo giờ') + ': không trừ thêm tiền.</strong>'
       : '<strong style="color:#dc2626">Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
     if (mode === 'quantity') {
       message += '<br><small>Đây là mức tạm giữ tối đa; thực tế = số đúng pass × 0,3đ + số Không thể log × 0,1đ. Đúng pass gồm Đủ LV, Chưa đạt, Bị khóa và CTNV; Chưa thể check không tính phí.</small>';
@@ -2573,10 +2599,13 @@ async function sendJob() {
     confirmQuantityWhileTimed = confirm('Tài khoản đang có quyền chạy theo giờ. Bạn vẫn muốn trả phí theo số lượng?');
     if (!confirmQuantityWhileTimed) return;
   }
-  const hasTimeAccess = quote?.dataset.hasEntitlement === '1' || Boolean(currentSession?.entitlement);
-  if (billingMode === 'time' && !hasTimeAccess) {
-    const rentalCost = blockCount * 5000;
-    if (!confirm('Tài khoản chưa có quyền theo giờ. Thuê ' + (blockCount * 30) +
+  const selectedSessionEntitlement = billingMode === 'vvip'
+    ? (currentSession?.entitlements?.vvip || currentSession?.vvip_entitlement)
+    : (currentSession?.entitlements?.normal || currentSession?.entitlement);
+  const hasTimeAccess = quote?.dataset.hasEntitlement === '1' || Boolean(selectedSessionEntitlement);
+  if (!isAdminKey && (billingMode === 'time' || billingMode === 'vvip') && !hasTimeAccess) {
+    const rentalCost = blockCount * (billingMode === 'vvip' ? 10000 : 5000);
+    if (!confirm('Tài khoản chưa có quyền ' + (billingMode === 'vvip' ? 'VVIP' : 'theo giờ') + '. Thuê ' + (blockCount * 30) +
       ' phút với giá ' + formatNumber(rentalCost) + 'đ và chạy job này?')) return;
   }
   btn.disabled = true;
@@ -2726,7 +2755,10 @@ function renderJobs(query = '') {
         : '<span class="badge badge-running"><i class="fa-solid fa-bolt fa-spin-fast"></i> Đang chạy</span>');
     const owner = j.owner_preview ? (' · <i class="fa-solid fa-user" style="font-size:10px"></i> ' + esc(j.owner_preview)) : '';
     let billing = '';
-    if (j.billing_mode === 'quantity') {
+    if (j.queue_type === 'vvip') {
+      billing = ' · <strong style="color:#7c3aed"><i class="fa-solid fa-crown"></i> VVIP</strong>' +
+        (j.access_until ? ' đến ' + esc(formatDate(j.access_until)) : '');
+    } else if (j.billing_mode === 'quantity') {
       billing = j.billing_state === 'settled'
         ? ' · Phí ' + formatNumber(j.final_amount) + 'đ'
         : ' · <span style="color:#b45309">Đang quyết toán</span>';
@@ -3094,7 +3126,10 @@ async function refreshDetail(forceRows = true) {
     dur.textContent = formatJobDuration(dur.dataset.start, dur.dataset.end);
 
     let billingDetail = '';
-    if (s.billing_mode === 'quantity') {
+    if (s.queue_type === 'vvip') {
+      billingDetail = '<div style="margin-top:10px;font-size:13px;color:#7c3aed"><i class="fa-solid fa-crown"></i> <strong>VVIP – hàng đợi riêng</strong>' +
+        (s.access_until ? ' · Quyền đến <strong>' + esc(formatDate(s.access_until)) + '</strong>' : '') + '</div>';
+    } else if (s.billing_mode === 'quantity') {
       billingDetail = '<div style="margin-top:10px;font-size:13px">Tính theo số lượng · ' +
         (s.billing_state === 'settled'
           ? '<strong>Đã quyết toán ' + formatNumber(s.final_amount) + 'đ</strong>'
