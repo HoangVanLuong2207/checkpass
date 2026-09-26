@@ -1803,6 +1803,42 @@ def fetch_satellite_health(target: dict[str, str]) -> dict[str, Any]:
     return result
 
 
+def restart_satellite(target: dict[str, str], control_token: str) -> dict[str, Any]:
+    base_url = target["url"].rstrip("/")
+    parsed = urllib.parse.urlsplit(base_url)
+    base_path = parsed.path.rstrip("/")
+    if base_path.endswith("/healthz"):
+        base_path = base_path[:-8].rstrip("/")
+    restart_url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, base_path + "/restart", "", ""))
+    request = urllib.request.Request(
+        restart_url,
+        data=b"{}",
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {control_token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "CheckpassMasterControl/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=SATELLITE_HEALTH_TIMEOUT) as response:
+            raw = response.read(64 * 1024).decode("utf-8", "replace")
+            data = json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read(500).decode("utf-8", "replace")
+        try:
+            data = json.loads(raw)
+        except Exception:
+            data = {}
+        raise RuntimeError(str(data.get("error") or f"Vệ tinh trả HTTP {exc.code}")) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Không gửi được lệnh restart: {exc}") from exc
+    if not isinstance(data, dict) or not data.get("ok"):
+        raise RuntimeError(str(data.get("error") if isinstance(data, dict) else "Phản hồi restart không hợp lệ"))
+    return {**data, "restart_url": restart_url}
+
+
 def _get_page_html() -> str:
     if _UI_FILE.is_file():
         try:
@@ -2365,6 +2401,11 @@ class MasterHandler(BaseHTTPRequestHandler):
                     return
                 self._handle_satellite_health()
                 return
+            if path == "/api/admin/satellites/restart":
+                if self._require_admin() is None:
+                    return
+                self._handle_satellite_restart()
+                return
             if path == "/api/deposit/create":
                 auth = self._require_user()
                 if auth is None:
@@ -2764,6 +2805,41 @@ class MasterHandler(BaseHTTPRequestHandler):
             "normal_active": sum(active_chunks(item) for item in results if item.get("expected_service_type") == "normal"),
             "vvip_active": sum(active_chunks(item) for item in results if item.get("expected_service_type") == "vvip"),
             "satellites": results,
+        })
+
+    def _handle_satellite_restart(self) -> None:
+        body = self._read_json()
+        if not isinstance(body, dict):
+            body = {}
+        requested_url = str(body.get("url") or "").strip().rstrip("/")
+        if not requested_url:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Thiếu URL vệ tinh"})
+            return
+        configured_targets = [
+            {**target, "expected_service_type": "normal"}
+            for target in parse_satellite_targets(_setting(self.server.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS))
+        ] + [
+            {**target, "expected_service_type": "vvip"}
+            for target in parse_satellite_targets(_setting(self.server.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS))
+        ]
+        target = next((item for item in configured_targets if item["url"].rstrip("/").lower() == requested_url.lower()), None)
+        if target is None:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "VPS chưa có trong danh sách đã lưu"})
+            return
+        control_token = os.environ.get("SATELLITE_CONTROL_TOKEN", "").strip() or (self.server.master_token or "").strip()
+        if not control_token:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Chưa cấu hình token điều khiển vệ tinh"})
+            return
+        try:
+            result = restart_satellite(target, control_token)
+        except RuntimeError as exc:
+            self._json(HTTPStatus.BAD_GATEWAY, {"ok": False, "error": str(exc)[:300]})
+            return
+        self._json(HTTPStatus.ACCEPTED, {
+            "ok": True,
+            "message": f"Đã gửi lệnh restart tới {target['label']}",
+            "satellite": target,
+            "control": result,
         })
 
     def _handle_clear_all_data(self) -> None:
