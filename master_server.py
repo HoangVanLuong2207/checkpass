@@ -1374,11 +1374,11 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
             JOIN jobs AS j ON j.id=c.job_id
             WHERE j.status='open'
               AND (
-                  (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=0)
+                  (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0)
                   OR
                   (?='normal' AND (
                       COALESCE(j.queue_type,'normal')='normal'
-                      OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=1)
+                      OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
                   ))
               )
               AND (j.billing_mode NOT IN ('time','vvip') OR j.access_until IS NULL OR j.access_until>?)
@@ -1410,11 +1410,11 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
         JOIN jobs AS j ON j.id=c.job_id
         WHERE c.job_id=?
           AND (
-              (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=0)
+              (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0)
               OR
               (?='normal' AND (
                   COALESCE(j.queue_type,'normal')='normal'
-                  OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=1)
+                  OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
               ))
           )
           AND (
