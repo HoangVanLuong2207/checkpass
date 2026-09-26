@@ -2226,7 +2226,7 @@ function openSubmitModal() {
   const vvipEntitlement = currentSession?.entitlements?.vvip || currentSession?.vvip_entitlement || null;
   const hasActiveEntitlement = Boolean(normalEntitlement?.id || vvipEntitlement?.id);
   if (isAdminKey || hasActiveEntitlement) {
-    const defaultMode = normalEntitlement?.id ? 'time' : (vvipEntitlement?.id ? 'vvip' : 'quantity');
+    const defaultMode = isAdminKey ? 'vvip' : (normalEntitlement?.id ? 'time' : (vvipEntitlement?.id ? 'vvip' : 'quantity'));
     applyBillingMode(defaultMode);
     showSubmitModalBox();
     return;

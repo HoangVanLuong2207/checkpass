@@ -195,7 +195,7 @@ class JobCreationRaceTest(unittest.TestCase):
         def create_job() -> None:
             try:
                 text = "\n".join(f"user{index}|pass{index}" for index in range(31))
-                created["response"] = self.post("/api/jobs", {"text": text})
+                created["response"] = self.post("/api/jobs", {"text": text, "billing_mode": "quantity"})
             except Exception as exc:  # pragma: no cover - surfaced by assertion below
                 created["error"] = exc
 
@@ -258,11 +258,11 @@ class JobCreationRaceTest(unittest.TestCase):
         self.assertEqual(vvip_claim["claim"]["job_id"], vvip_job)
         self.assertEqual(vvip_claim["claim"]["queue_type"], "vvip")
 
-    def test_vvip_billing_option_creates_a_vvip_queue_job(self) -> None:
+    def test_admin_defaults_to_vvip_queue_job(self) -> None:
         self.store.block_once = False
         status, created = self.post(
             "/api/jobs",
-            {"text": "vvip-user|pass", "billing_mode": "vvip", "block_count": 1},
+            {"text": "vvip-user|pass"},
         )
         self.assertEqual(status, 200)
         self.assertEqual(created["queue_type"], "vvip")

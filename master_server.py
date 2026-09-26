@@ -2792,7 +2792,10 @@ class MasterHandler(BaseHTTPRequestHandler):
         owner_user_id = int((auth or {}).get("user_id") or 0)
         owner_email = str((auth or {}).get("email") or "")
         owner_name = str((auth or {}).get("name") or "")
-        billing_mode = str(body.get("billing_mode") or "quantity").strip().lower()
+        # Admin jobs use the isolated VVIP queue unless the admin explicitly
+        # selects another billing mode. Regular users keep quantity as default.
+        default_billing_mode = "vvip" if is_admin else "quantity"
+        billing_mode = str(body.get("billing_mode") or default_billing_mode).strip().lower()
         if billing_mode not in {"quantity", "time", "vvip"}:
             self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "billing_mode phải là quantity, time hoặc vvip"})
             return
