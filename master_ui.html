@@ -436,11 +436,11 @@ body {
   font-weight: 600;
 }
 
-/* Top Overview Stats Grid (1 Cột 4 Hàng cạnh Notice) */
+/* Top Overview Stats Grid (1 Cột 5 Hàng cạnh Notice) */
 .overview-grid {
   display: grid;
   grid-template-columns: 1fr;
-  grid-template-rows: repeat(4, 1fr);
+  grid-template-rows: repeat(5, 1fr);
   gap: 10px;
   margin: 0;
   width: 100%;
@@ -482,6 +482,7 @@ body {
 .overview-icon.running { background: #FEF3C7; color: #D97706; }
 .overview-icon.done { background: #D1FAE5; color: #059669; }
 .overview-icon.accounts { background: #FEE2E2; color: #DC2626; }
+.overview-icon.pending-accounts { background: #DBEAFE; color: #2563EB; }
 
 .overview-info {
   flex: 1;
@@ -1631,7 +1632,7 @@ table.data-table tbody tr:hover {
 </header>
 
 <div class="container">
-  <!-- Top Section: Notice Banner + Overview Stats Grid (4 Cards) -->
+  <!-- Top Section: Notice Banner + Overview Stats Grid (5 Cards) -->
   <div class="top-section-row" id="topSectionRow">
     <!-- System Notice Banner -->
     <div class="notice-box" id="noticeBox">
@@ -1650,7 +1651,7 @@ table.data-table tbody tr:hover {
       </div>
     </div>
 
-    <!-- Top Overview Stats (4 Cards Row) -->
+    <!-- Top Overview Stats (5 Cards Row) -->
     <div class="overview-grid">
       <div class="overview-card">
         <div class="overview-icon jobs"><i class="fa-solid fa-layer-group"></i></div>
@@ -1676,8 +1677,15 @@ table.data-table tbody tr:hover {
       <div class="overview-card">
         <div class="overview-icon accounts"><i class="fa-solid fa-users"></i></div>
         <div class="overview-info">
-          <div class="overview-num" id="topTotalAccs">0 / 0</div>
-          <div class="overview-label">Tài khoản Tổng / Đã xong</div>
+          <div class="overview-num" id="topTotalAccs">0</div>
+          <div class="overview-label">Tài khoản tổng</div>
+        </div>
+      </div>
+      <div class="overview-card">
+        <div class="overview-icon pending-accounts"><i class="fa-solid fa-hourglass-half"></i></div>
+        <div class="overview-info">
+          <div class="overview-num" id="topPendingAccs">0</div>
+          <div class="overview-label">Tài khoản chờ kiểm tra</div>
         </div>
       </div>
     </div>
@@ -2679,7 +2687,8 @@ function updateOverviewStats(jobs, overview) {
   document.getElementById('topTotalJobs').textContent = formatNumber(totalJobs);
   document.getElementById('topRunningJobs').textContent = formatNumber(running);
   document.getElementById('topDoneJobs').textContent = formatNumber(done);
-  document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs) + ' / ' + formatNumber(processedAccs);
+  document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs);
+  document.getElementById('topPendingAccs').textContent = formatNumber(Math.max(0, totalAccs - processedAccs));
 }
 
 function filterJobsList() {
