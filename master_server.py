@@ -2800,9 +2800,13 @@ class MasterHandler(BaseHTTPRequestHandler):
         # The overview scans one compact row per job, never the account results.
         overview_row = store.fetchone(
             "SELECT COUNT(*), "
-            "SUM(CASE WHEN job_status IN ('creating','open') THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN job_status IN ('creating','open','stopping') THEN 1 ELSE 0 END), "
             "SUM(CASE WHEN job_status='done' THEN 1 ELSE 0 END), "
-            "SUM(total_accounts), SUM(result_count) FROM job_stats"
+            "SUM(total_accounts), SUM(result_count), "
+            "SUM(CASE "
+            "WHEN job_status IN ('creating','open','stopping') AND total_accounts>result_count "
+            "THEN total_accounts-result_count ELSE 0 END) "
+            "FROM job_stats"
         )
         overview = {
             "total_jobs": int((overview_row[0] if overview_row else 0) or 0),
@@ -2810,6 +2814,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             "done_jobs": int((overview_row[2] if overview_row else 0) or 0),
             "total_accounts": int((overview_row[3] if overview_row else 0) or 0),
             "processed_accounts": int((overview_row[4] if overview_row else 0) or 0),
+            "pending_accounts": int((overview_row[5] if overview_row else 0) or 0),
         }
         select_sql = (
             "SELECT j.id,j.created_at,j.total,j.chunk_size,j.status,j.finished_at,j.owner_preview,"

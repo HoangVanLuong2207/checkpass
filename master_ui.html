@@ -2722,20 +2722,22 @@ function updateOverviewStats(jobs, overview) {
   let running = hasSystemOverview ? Number(overview.running_jobs || 0) : 0;
   let done = hasSystemOverview ? Number(overview.done_jobs || 0) : 0;
   let totalAccs = hasSystemOverview ? Number(overview.total_accounts || 0) : 0;
-  let processedAccs = hasSystemOverview ? Number(overview.processed_accounts || 0) : 0;
+  let pendingAccs = hasSystemOverview ? Number(overview.pending_accounts || 0) : 0;
   if (!hasSystemOverview) {
     jobs.forEach(j => {
       if (j.status === 'done') done++;
       else running++;
       totalAccs += Number(j.total || 0);
-      processedAccs += Number(j.processed || 0);
+      if (j.status !== 'done') {
+        pendingAccs += Math.max(0, Number(j.total || 0) - Number(j.processed || 0));
+      }
     });
   }
   document.getElementById('topTotalJobs').textContent = formatNumber(totalJobs);
   document.getElementById('topRunningJobs').textContent = formatNumber(running);
   document.getElementById('topDoneJobs').textContent = formatNumber(done);
   document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs);
-  document.getElementById('topPendingAccs').textContent = formatNumber(Math.max(0, totalAccs - processedAccs));
+  document.getElementById('topPendingAccs').textContent = formatNumber(Math.max(0, pendingAccs));
 }
 
 function filterJobsList() {
