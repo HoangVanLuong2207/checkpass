@@ -1897,10 +1897,10 @@ table.data-table tbody tr:hover {
           <div style="flex:1">
             <div style="display:flex;align-items:center;justify-content:space-between">
               <strong style="font-size:15px;color:var(--text)">Theo số lượng tài khoản</strong>
-              <span style="font-size:12px;font-weight:700;color:var(--secondary);background:#fff7ed;padding:2px 8px;border-radius:6px;border:1px solid #fed7aa">0,3đ / acc OK</span>
+              <span style="font-size:12px;font-weight:700;color:var(--secondary);background:#fff7ed;padding:2px 8px;border-radius:6px;border:1px solid #fed7aa">Đúng pass 0,3đ · Không thể log 0,1đ</span>
             </div>
             <div style="font-size:13px;color:var(--text-muted);margin-top:4px;line-height:1.4">
-              Chỉ tính tiền các nick <strong>ĐÚNG MẬT KHẨU (OK)</strong>. Sai pass, 2FA hoặc lỗi sẽ được hoàn lại 100%. <strong>Phù hợp: &lt; 16.000 tài khoản.</strong>
+              Tính <strong>0,3đ</strong> cho nick đúng pass (Đủ LV, Chưa đạt, Bị khóa, CTNV) và <strong>0,1đ</strong> cho nick Không thể log. Chưa thể check không tính phí. <strong>Phù hợp: &lt; 16.000 tài khoản.</strong>
             </div>
           </div>
         </div>
@@ -2237,7 +2237,7 @@ function applyBillingMode(mode) {
     if (banner) banner.innerHTML = '<span style="color:#16a34a"><i class="fa-solid fa-stopwatch"></i> Theo thời gian (5.000đ / block 30 phút - không giới hạn acc)</span>';
     if (changeBtn) changeBtn.style.display = 'inline-flex';
   } else {
-    if (banner) banner.innerHTML = '<span style="color:var(--secondary)"><i class="fa-solid fa-list-check"></i> Theo số lượng (0,3đ / acc OK - hoàn tiền nick sai)</span>';
+    if (banner) banner.innerHTML = '<span style="color:var(--secondary)"><i class="fa-solid fa-list-check"></i> Theo số lượng (Đúng pass 0,3đ · Không thể log 0,1đ)</span>';
     if (changeBtn) changeBtn.style.display = 'inline-flex';
   }
 
@@ -2518,7 +2518,7 @@ async function refreshQuote() {
       ? '<strong style="color:#047857">Đang có quyền theo giờ: không trừ thêm tiền.</strong>'
       : '<strong style="color:#dc2626">Chi phí dự kiến: ' + amount + 'đ</strong> · Số dư khả dụng: ' + available + 'đ';
     if (mode === 'quantity') {
-      message += '<br><small>Đây là mức tạm giữ tối đa; số tiền thực tế = số OK × 0,3đ.</small>';
+      message += '<br><small>Đây là mức tạm giữ tối đa; thực tế = số đúng pass × 0,3đ + số Không thể log × 0,1đ. Đúng pass gồm Đủ LV, Chưa đạt, Bị khóa và CTNV; Chưa thể check không tính phí.</small>';
       if (data.entitlement) message += '<br><strong style="color:#b45309">Bạn đang có quyền theo giờ; nên chọn Theo thời gian để tối ưu chi phí.</strong>';
     }
     if (!data.affordable) {

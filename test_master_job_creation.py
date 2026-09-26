@@ -359,6 +359,35 @@ class JobCreationRaceTest(unittest.TestCase):
             (0, 0, 0, 0),
         )
 
+    def test_all_correct_password_categories_count_as_ok_for_billing(self) -> None:
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
+            (1, 4, 15, "open"),
+        )
+        chunk_id = self.inner.exec(
+            "INSERT INTO chunks (job_id, idx, account) VALUES (?,?,?)",
+            (job_id, 0, "[]"),
+        )
+        rows = (
+            ("du-lv", {"status": "OK", "level": "50", "player_status": "Bình thường"}),
+            ("chua-dat", {"status": "OK", "level": "5", "player_status": "Bình thường"}),
+            ("bi-khoa", {"status": "OK", "level": "30", "player_status": "Bị khóa"}),
+            ("ctnv", {"status": "OK", "level": "Ctnv", "player_status": "Chưa tạo nhân vật"}),
+        )
+        for account, row in rows:
+            self.inner.exec(
+                "INSERT INTO results (chunk_id, job_id, account, row_json, reported_at) VALUES (?,?,?,?,?)",
+                (chunk_id, job_id, account, json.dumps(row, ensure_ascii=False), 2),
+            )
+
+        self.assertEqual(
+            self.inner.fetchone(
+                "SELECT result_count, ok_count, fail_count, uncheckable_count FROM job_stats WHERE job_id=?",
+                (job_id,),
+            ),
+            (4, 4, 0, 0),
+        )
+
     def test_job_stats_follow_chunk_and_job_status_updates(self) -> None:
         job_id = self.inner.exec(
             "INSERT INTO jobs (created_at, total, chunk_size, status) VALUES (?,?,?,?)",
@@ -796,7 +825,7 @@ class JobCreationRaceTest(unittest.TestCase):
 
         def settle(path: str, payload: dict, method: str = "POST") -> dict:
             captured.update(payload)
-            return {"ok": True, "status": "settled", "order_id": 501, "final_amount_tenths": 3}
+            return {"ok": True, "status": "settled", "order_id": 501}
 
         with mock.patch.object(master_server, "_aovshop_configured", return_value=True), mock.patch.object(
             master_server, "_aovshop_request", side_effect=settle
@@ -805,11 +834,12 @@ class JobCreationRaceTest(unittest.TestCase):
 
         self.assertEqual(captured["ok_count"], 1)
         self.assertEqual(captured["fail_count"], 1)
+        self.assertEqual(captured["uncheckable_count"], 0)
         self.assertEqual(captured["idempotency_key"], "settle:cp-test-settle")
         settled = self.inner.fetchone(
             "SELECT billing_state,final_amount_tenths,billing_order_id FROM jobs WHERE id=?", (job_id,)
         )
-        self.assertEqual(settled, ("settled", 3, 501))
+        self.assertEqual(settled, ("settled", 4, 501))
         self.assertIsNone(self.inner.fetchone("SELECT job_id FROM billing_outbox WHERE job_id=?", (job_id,)))
         self.inner.exec("UPDATE jobs SET created_at=? WHERE id=?", (cutoff - 1, job_id))
         self.assertEqual(_prune_completed_jobs_before_today(self.inner, cutoff)["jobs"], 1)

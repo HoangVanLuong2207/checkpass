@@ -15,4 +15,4 @@ Biến môi trường bắt buộc trên master:
 
 Backend AOVshop cần `CHECKPASS_SERVICE_TOKEN`, `CHECKPASS_ALLOWED_ORIGINS` và `CHECKPASS_URL`. Nên deploy backend trước để migration bổ sung cột tiền chính xác và các bảng SSO/billing chạy xong, sau đó deploy frontend SP1S, cuối cùng mới deploy master.
 
-Tiền được lưu chính xác theo đơn vị 0,1 VND (`balance_tenths`). Chế độ số lượng tạm giữ `số tài khoản × 0,3đ` và quyết toán theo số OK. Chế độ thời gian có giá cố định `5.000đ / 30 phút`; quyền còn hiệu lực được tái sử dụng mà không trừ thêm.
+Tiền được lưu chính xác theo đơn vị 0,1 VND (`balance_tenths`). Chế độ số lượng tạm giữ `số tài khoản × 0,3đ`, sau đó quyết toán `số đúng pass × 0,3đ + số Không thể log × 0,1đ`. Đúng pass gồm Đủ LV, Chưa đạt, Bị khóa và CTNV; Chưa thể check không tính phí. Chế độ thời gian có giá cố định `5.000đ / 30 phút`; quyền còn hiệu lực được tái sử dụng mà không trừ thêm.

@@ -48,6 +48,7 @@ DEFAULT_DB_PATH = Path(__file__).resolve().with_name("master.db")
 DEFAULT_LEASE_MINUTES = 3
 MAX_SATELLITE_LEASE_MINUTES = 3
 MAX_ACCOUNT_RETRY_ROUNDS = 3
+QUANTITY_FAIL_PRICE_TENTHS = 1
 MAX_BODY = 32 * 1024 * 1024
 SATELLITE_HEALTH_TIMEOUT = 20
 STOP_FINALIZE_BATCH_SIZE = 250
@@ -3797,7 +3798,10 @@ class CoordinatorServer(ThreadingHTTPServer):
                 raise RuntimeError(str(result.get("error") or "SP1S chưa xác nhận quyết toán"))
             final_tenths = result.get("final_amount_tenths")
             if final_tenths is None:
-                final_tenths = int(ok_count or 0) * int(unit_price or 3)
+                final_tenths = (
+                    int(ok_count or 0) * int(unit_price or 3)
+                    + int(fail_count or 0) * QUANTITY_FAIL_PRICE_TENTHS
+                )
             self.store.batch([
                 {
                     "sql": "UPDATE jobs SET billing_state='settled',final_amount_tenths=?,"
@@ -3808,6 +3812,7 @@ class CoordinatorServer(ThreadingHTTPServer):
             ])
             print(
                 f"[master] settled job {job_id}: {int(ok_count or 0)} OK, "
+                f"{int(fail_count or 0)} failed login, "
                 f"{_money_from_tenths(final_tenths)} VND",
                 flush=True,
             )
