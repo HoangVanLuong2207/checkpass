@@ -2406,6 +2406,11 @@ class MasterHandler(BaseHTTPRequestHandler):
                     return
                 self._handle_satellite_restart()
                 return
+            if path == "/api/admin/satellites/restart-all":
+                if self._require_admin() is None:
+                    return
+                self._handle_satellites_restart_all()
+                return
             if path == "/api/deposit/create":
                 auth = self._require_user()
                 if auth is None:
@@ -2840,6 +2845,60 @@ class MasterHandler(BaseHTTPRequestHandler):
             "message": f"Đã gửi lệnh restart tới {target['label']}",
             "satellite": target,
             "control": result,
+        })
+
+    def _handle_satellites_restart_all(self) -> None:
+        try:
+            body = self._read_json()
+        except ValueError as exc:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": str(exc)})
+            return
+        if not isinstance(body, dict):
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Dữ liệu không hợp lệ"})
+            return
+        configured_targets = [
+            {**target, "expected_service_type": "normal"}
+            for target in parse_satellite_targets(_setting(self.server.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS))
+        ] + [
+            {**target, "expected_service_type": "vvip"}
+            for target in parse_satellite_targets(_setting(self.server.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS))
+        ]
+        targets: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+        for target in configured_targets:
+            normalized = target["url"].rstrip("/").lower()
+            if normalized in seen_urls:
+                continue
+            seen_urls.add(normalized)
+            targets.append(target)
+        if not targets:
+            self._json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "Danh sách VPS đang trống"})
+            return
+        control_token = os.environ.get("SATELLITE_CONTROL_TOKEN", "").strip() or (self.server.master_token or "").strip()
+        if not control_token:
+            self._json(HTTPStatus.SERVICE_UNAVAILABLE, {"ok": False, "error": "Chưa cấu hình token điều khiển vệ tinh"})
+            return
+        results: list[dict[str, Any] | None] = [None] * len(targets)
+        with ThreadPoolExecutor(max_workers=min(12, len(targets))) as pool:
+            futures = {pool.submit(restart_satellite, target, control_token): index for index, target in enumerate(targets)}
+            for future in as_completed(futures):
+                index = futures[future]
+                target = targets[index]
+                try:
+                    result = future.result()
+                    results[index] = {**target, "ok": True, "control": result}
+                except Exception as exc:
+                    results[index] = {**target, "ok": False, "error": str(exc)[:300]}
+        completed = [result for result in results if result is not None]
+        succeeded = sum(1 for result in completed if result.get("ok"))
+        failed = len(completed) - succeeded
+        self._json(HTTPStatus.ACCEPTED, {
+            "ok": True,
+            "message": f"Đã gửi lệnh restart tới {succeeded}/{len(targets)} service",
+            "total": len(targets),
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": completed,
         })
 
     def _handle_clear_all_data(self) -> None:
