@@ -152,7 +152,6 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     user_id INTEGER NOT NULL,
     email TEXT NOT NULL,
     name TEXT NOT NULL,
-    is_admin INTEGER NOT NULL DEFAULT 0,
     expires_at REAL NOT NULL,
     last_seen_at REAL NOT NULL,
     created_at REAL NOT NULL
@@ -258,7 +257,6 @@ CREATE TABLE IF NOT EXISTS web_sessions (
     user_id BIGINT NOT NULL,
     email TEXT NOT NULL,
     name TEXT NOT NULL,
-    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     expires_at DOUBLE PRECISION NOT NULL,
     last_seen_at DOUBLE PRECISION NOT NULL,
     created_at DOUBLE PRECISION NOT NULL
@@ -302,7 +300,6 @@ _SQLITE_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN access_until REAL",
     "ALTER TABLE jobs ADD COLUMN billing_order_id INTEGER",
     "ALTER TABLE jobs ADD COLUMN billing_error TEXT DEFAULT ''",
-    "ALTER TABLE web_sessions ADD COLUMN is_admin INTEGER DEFAULT 0",
     "CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>''",
@@ -324,7 +321,6 @@ _POSTGRES_JOB_BILLING_MIGRATIONS = (
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS access_until DOUBLE PRECISION",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billing_order_id BIGINT",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS billing_error TEXT DEFAULT ''",
-    "ALTER TABLE web_sessions ADD COLUMN IF NOT EXISTS is_admin BOOLEAN DEFAULT FALSE",
     "CREATE INDEX IF NOT EXISTS idx_jobs_owner_user ON jobs(owner_user_id)",
     "CREATE INDEX IF NOT EXISTS idx_jobs_queue_status ON jobs(queue_type,status)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_reference ON jobs(external_job_reference) WHERE external_job_reference<>''",
@@ -1815,7 +1811,7 @@ class MasterHandler(BaseHTTPRequestHandler):
             return None
         now = _now()
         row = self.server.store.fetchone(
-            "SELECT user_id,email,name,expires_at,is_admin FROM web_sessions WHERE session_hash=?",
+            "SELECT user_id,email,name,expires_at FROM web_sessions WHERE session_hash=?",
             (_session_hash(session),),
         )
         if not row or float(row[3] or 0) <= now:
@@ -1826,16 +1822,15 @@ class MasterHandler(BaseHTTPRequestHandler):
             "UPDATE web_sessions SET last_seen_at=? WHERE session_hash=?",
             (now, _session_hash(session)),
         )
-        is_admin = bool(row[4]) if len(row) > 4 and row[4] else False
         return {
             "authorized": True,
-            "is_admin": is_admin,
+            "is_admin": False,
             "is_satellite": False,
             "user_id": int(row[0]),
             "email": str(row[1] or ""),
             "name": str(row[2] or ""),
             "owner_hash": "",
-            "owner_preview": "admin" if is_admin else str(row[1] or row[2] or f"user-{row[0]}"),
+            "owner_preview": str(row[1] or row[2] or f"user-{row[0]}"),
             "token": "",
         }
 
@@ -2096,14 +2091,13 @@ class MasterHandler(BaseHTTPRequestHandler):
                     user_id = int(user.get("id") or 0)
                     if not result.get("ok") or user_id <= 0:
                         raise RuntimeError(str(result.get("error") or "Không xác thực được tài khoản SP1S"))
-                    is_admin = bool(result.get("is_admin") or user.get("role") == "admin")
                     session = secrets.token_urlsafe(48)
                     now = _now()
                     self.server.store.exec_with_changes(
-                        "INSERT INTO web_sessions (session_hash,user_id,email,name,is_admin,expires_at,last_seen_at,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                        "INSERT INTO web_sessions (session_hash,user_id,email,name,expires_at,last_seen_at,created_at) VALUES (?,?,?,?,?,?,?)",
                         (
                             _session_hash(session), user_id, str(user.get("email") or ""),
-                            str(user.get("name") or ""), bool(is_admin), now + CHECKPASS_SESSION_SECONDS, now, now,
+                            str(user.get("name") or ""), now + CHECKPASS_SESSION_SECONDS, now, now,
                         ),
                     )
                     self._redirect("/?login=success", [self._session_cookie(session), clear_state])
