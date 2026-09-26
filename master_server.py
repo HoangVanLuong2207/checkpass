@@ -1360,7 +1360,9 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
 
     Choosing a chunk globally would make a job's claim probability proportional
     to its remaining chunk count.  Selecting the least-active job first prevents
-    a large job from starving smaller jobs.
+    a large job from starving smaller jobs. Normal jobs stay entirely in the
+    normal pool; VVIP jobs alternate chunks between VVIP (even idx) and normal
+    (odd idx), giving VVIP the extra chunk when the total is odd.
     """
 
     selected_job = store.fetchone(
@@ -1371,7 +1373,14 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
             FROM chunks AS c
             JOIN jobs AS j ON j.id=c.job_id
             WHERE j.status='open'
-              AND COALESCE(j.queue_type,'normal')=?
+              AND (
+                  (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=0)
+                  OR
+                  (?='normal' AND (
+                      COALESCE(j.queue_type,'normal')='normal'
+                      OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=1)
+                  ))
+              )
               AND (j.billing_mode NOT IN ('time','vvip') OR j.access_until IS NULL OR j.access_until>?)
               AND (
                   c.status='pending'
@@ -1389,25 +1398,34 @@ def select_fair_claim_candidate(store: Any, now: float, satellite_id: str, queue
         ORDER BY COALESCE(active.active_count, 0) ASC, available.job_id ASC
         LIMIT 1
         """,
-        (queue_type, now, now, satellite_id, now),
+        (queue_type, queue_type, now, now, satellite_id, now),
     )
     if selected_job is None:
         return None
 
     return store.fetchone(
         """
-        SELECT id, job_id, account
-        FROM chunks
-        WHERE job_id=?
+        SELECT c.id, c.job_id, c.account
+        FROM chunks AS c
+        JOIN jobs AS j ON j.id=c.job_id
+        WHERE c.job_id=?
           AND (
-              status='pending'
-              OR (status='claimed' AND lease_until IS NOT NULL AND lease_until < ?)
+              (?='vvip' AND COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=0)
+              OR
+              (?='normal' AND (
+                  COALESCE(j.queue_type,'normal')='normal'
+                  OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx % 2)=1)
+              ))
           )
-          AND (avoid_satellite_id='' OR avoid_satellite_id<>?)
+          AND (
+              c.status='pending'
+              OR (c.status='claimed' AND c.lease_until IS NOT NULL AND c.lease_until < ?)
+          )
+          AND (c.avoid_satellite_id='' OR c.avoid_satellite_id<>?)
         ORDER BY RANDOM()
         LIMIT 1
         """,
-        (selected_job[0], now, satellite_id),
+        (selected_job[0], queue_type, queue_type, now, satellite_id),
     )
 
 
