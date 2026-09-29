@@ -2678,6 +2678,14 @@ function formatJobDuration(start, end) {
   return String(hours).padStart(2, '0') + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0');
 }
 
+function jobSpeedPerMinute(processed, start, end) {
+  const startTime = Number(start);
+  if (!Number.isFinite(startTime) || startTime <= 0) return 0;
+  const endTime = Number(end) || Date.now() / 1000;
+  const elapsedSeconds = Math.max(1, endTime - startTime);
+  return Math.round(Math.max(0, Number(processed) || 0) * 60 / elapsedSeconds);
+}
+
 function updateJobDurations() {
   document.querySelectorAll('.job-duration').forEach(el => {
     el.textContent = formatJobDuration(el.dataset.start, el.dataset.end);
@@ -3135,6 +3143,7 @@ async function refreshDetail(forceRows = true) {
     const total = Number(s.total || 0);
     const processed = Math.min(total, Number(r.count || 0));
     const percent = progressPercent(processed, total);
+    const speedPerMinute = jobSpeedPerMinute(processed, s.created_at, s.finished_at);
 
     const stopBtn = document.getElementById('stopJobBtn');
     if (stopBtn) {
@@ -3179,7 +3188,7 @@ async function refreshDetail(forceRows = true) {
 
     document.getElementById('detailStats').innerHTML =
       '<div class="stat-box blue"><div class="num">' + formatNumber(total) + '</div><div class="lbl">Tổng tài khoản</div></div>' +
-      '<div class="stat-box"><div class="num">' + formatNumber(processed) + '</div><div class="lbl">Đã xử lý</div></div>' +
+      '<div class="stat-box" title="Tốc độ trung bình từ lúc tạo job"><div class="num">' + formatNumber(speedPerMinute) + '</div><div class="lbl">Tốc độ/phút</div></div>' +
       '<div class="stat-box ok"><div class="num">' + formatNumber(r.ok || 0) + '</div><div class="lbl">OK (Đúng)</div></div>' +
       '<div class="stat-box fail"><div class="num">' + formatNumber(r.fail || 0) + '</div><div class="lbl">Không thể log</div></div>' +
       '<div class="stat-box pending"><div class="num">' + formatNumber(r.uncheckable || 0) + '</div><div class="lbl">Chưa thể check</div></div>' +
