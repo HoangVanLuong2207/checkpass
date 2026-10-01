@@ -271,12 +271,85 @@ class JobCreationRaceTest(unittest.TestCase):
         )
         self.assertEqual(job, ("admin", "vvip"))
 
-        _, normal_claim = self.post("/api/claim", {"satellite_id": "normal-satellite"})
-        self.assertIsNone(normal_claim["claim"])
         _, vvip_claim = self.post(
             "/api/vvip/claim", {"satellite_id": "vvip-satellite"}, token="secret"
         )
         self.assertEqual(vvip_claim["claim"]["job_id"], created["job_id"])
+
+    def test_vvip_chunk_shares_are_30_70_including_small_jobs(self) -> None:
+        for count in (1, 2, 3, 4, 7, 9, 10, 11, 20, 23):
+            with self.subTest(chunks=count):
+                job_id = self.inner.exec(
+                    "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type) VALUES (?,?,?,?,?)",
+                    (time.time(), count, 1, "open", "vvip"),
+                )
+                for idx in range(count):
+                    self.inner.exec(
+                        "INSERT INTO chunks (job_id,idx,account) VALUES (?,?,?)",
+                        (job_id, idx, '["user|pass"]'),
+                    )
+                claimed = set()
+                for pool, expected in (("vvip", (count * 3 + 9) // 10),
+                                       ("normal", count - (count * 3 + 9) // 10)):
+                    pool_count = 0
+                    while True:
+                        row = master_server.select_fair_claim_candidate(
+                            self.inner, time.time(), "test-satellite", pool
+                        )
+                        if row is None:
+                            break
+                        self.assertEqual(row[1], job_id)
+                        self.assertNotIn(row[0], claimed)
+                        claimed.add(row[0])
+                        pool_count += 1
+                        self.inner.exec("UPDATE chunks SET status='done' WHERE id=?", (row[0],))
+                    self.assertEqual(pool_count, expected)
+                self.assertEqual(len(claimed), count)
+                self.inner.exec("UPDATE jobs SET status='done' WHERE id=?", (job_id,))
+
+    def test_vvip_drains_normal_share_without_stealing_active_chunks(self) -> None:
+        job_id = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type) VALUES (?,?,?,?,?)",
+            (time.time(), 10, 1, "open", "vvip"),
+        )
+        chunk_ids = {}
+        for idx in range(10):
+            chunk_ids[idx] = self.inner.exec(
+                "INSERT INTO chunks (job_id,idx,account) VALUES (?,?,?)",
+                (job_id, idx, '["user|pass"]'),
+            )
+        normal_job = self.inner.exec(
+            "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type) VALUES (?,?,?,?,?)",
+            (time.time(), 1, 1, "open", "normal"),
+        )
+        self.inner.exec(
+            "INSERT INTO chunks (job_id,idx,account) VALUES (?,?,?)",
+            (normal_job, 0, '["normal|pass"]'),
+        )
+        self.inner.exec(
+            "UPDATE chunks SET status='claimed',satellite_id=?,lease_until=? WHERE id=?",
+            ("normal-worker", time.time() + 600, chunk_ids[1]),
+        )
+        claimed = []
+        for _ in range(9):
+            status, payload = self.post("/api/vvip/claim", {"satellite_id": "vvip-worker"})
+            self.assertEqual(status, 200)
+            self.assertIsNotNone(payload["claim"])
+            self.assertEqual(payload["claim"]["job_id"], job_id)
+            claimed.append(payload["claim"]["chunk_id"])
+        self.assertEqual(set(claimed[:3]), {chunk_ids[i] for i in (0, 3, 6)})
+        self.assertEqual(set(claimed), set(chunk_ids.values()) - {chunk_ids[1]})
+        self.assertEqual(len(set(claimed)), 9)
+        _, payload = self.post("/api/vvip/claim", {"satellite_id": "vvip-worker"})
+        self.assertIsNone(payload["claim"])
+        self.assertEqual(
+            self.inner.fetchone("SELECT satellite_id FROM chunks WHERE id=?", (chunk_ids[1],))[0],
+            "normal-worker",
+        )
+        # A normal worker's expired lease becomes available to VVIP on the next poll.
+        self.inner.exec("UPDATE chunks SET lease_until=? WHERE id=?", (time.time() - 1, chunk_ids[1]))
+        _, payload = self.post("/api/vvip/claim", {"satellite_id": "vvip-worker"})
+        self.assertEqual(payload["claim"]["chunk_id"], chunk_ids[1])
 
     def test_open_job_without_chunks_is_not_completed(self) -> None:
         orphan_id = self.inner.exec(

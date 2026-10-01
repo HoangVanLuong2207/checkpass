@@ -1372,20 +1372,25 @@ def select_fair_claim_candidate(
     Choosing a chunk globally would make a job's claim probability proportional
     to its remaining chunk count.  Selecting the least-active job first prevents
     a large job from starving smaller jobs. Normal jobs stay entirely in the
-    normal pool. VVIP jobs initially alternate chunks between VVIP (even idx)
-    and normal (odd idx). Once a service pool has no preferred chunk left, it
-    may claim the other half of a VVIP job so uneven satellite pools stay busy.
+    normal pool. VVIP jobs assign 30% of chunks to VVIP and 70% to normal.
+    Spread VVIP chunks across each group of ten (indices 0, 3, 6), rounding
+    its share up for incomplete groups. Once a service pool has no preferred
+    chunk left, it may claim available chunks from the other VVIP job share.
     """
 
+    # Integer arithmetic works on SQLite/libSQL and PostgreSQL without optional
+    # SQL math functions or percent signs conflicting with psycopg placeholders.
+    vvip_share = "(c.idx - (c.idx / 10) * 10) IN (0,3,6)"
+    normal_share = "(c.idx - (c.idx / 10) * 10) NOT IN (0,3,6)"
     if queue_type == "vvip":
-        preferred_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0"
-        overflow_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1"
+        preferred_filter = f"COALESCE(j.queue_type,'normal')='vvip' AND {vvip_share}"
+        overflow_filter = f"COALESCE(j.queue_type,'normal')='vvip' AND {normal_share}"
     else:
-        preferred_filter = """(
+        preferred_filter = f"""(
             COALESCE(j.queue_type,'normal')='normal'
-            OR (COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=1)
+            OR (COALESCE(j.queue_type,'normal')='vvip' AND {normal_share})
         )"""
-        overflow_filter = "COALESCE(j.queue_type,'normal')='vvip' AND (c.idx & 1)=0"
+        overflow_filter = f"COALESCE(j.queue_type,'normal')='vvip' AND {vvip_share}"
     route_filter = overflow_filter if allow_overflow else preferred_filter
 
     selected_job = store.fetchone(

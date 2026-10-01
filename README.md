@@ -2,6 +2,8 @@
 
 Master gọi `GET /healthz` của mỗi vệ tinh trong danh sách đã lưu ở trang quản trị mỗi 2 phút. Vệ tinh thường và VVIP được quản lý bằng hai danh sách riêng (`satellite_targets`, `vvip_satellite_targets`), nên thay đổi danh sách không cần khởi động lại master. Service thường chạy `python service-litesel.py`; service VVIP chạy `python service-liteselVVIP.py` và chỉ claim hàng đợi VVIP.
 
+Job VVIP chia chunk ưu tiên theo tỷ lệ 30% cho VPS VVIP, 70% cho VPS thường (phần VVIP làm tròn lên khi số chunk không chia hết cho 10). Khi hết chunk ưu tiên có thể nhận, VPS VVIP lấy tiếp chunk trống thuộc phần thường của job VVIP. Chunk đang được VPS khác xử lý chỉ được nhận lại khi hết lease; vệ tinh tiếp tục polling để nhận việc mới. VPS thường vẫn có thể hỗ trợ phần VVIP khi hết việc ưu tiên, còn VPS VVIP chỉ nhận job VVIP.
+
 ## SP1S SSO và thanh toán Checkban
 
 Người dùng Checkpass đăng nhập bằng tài khoản SP1S; license key cũ không còn được chấp nhận khi tích hợp SP1S được cấu hình. `MASTER_TOKEN` chỉ dành cho quản trị và vệ tinh.
