@@ -1402,7 +1402,6 @@ def select_fair_claim_candidate(
             JOIN jobs AS j ON j.id=c.job_id
             WHERE j.status='open'
               AND ({route_filter})
-              AND (j.billing_mode NOT IN ('time','vvip') OR j.access_until IS NULL OR j.access_until>?)
               AND (
                   c.status='pending'
                   OR (c.status='claimed' AND c.lease_until IS NOT NULL AND c.lease_until < ?)
@@ -1419,7 +1418,7 @@ def select_fair_claim_candidate(
         ORDER BY COALESCE(active.active_count, 0) ASC, available.job_id ASC
         LIMIT 1
         """,
-        (now, now, satellite_id, now),
+        (now, satellite_id, now),
     )
     if selected_job is None:
         return None
@@ -4383,23 +4382,11 @@ class CoordinatorServer(ThreadingHTTPServer):
         return len(rows)
 
     def billing_maintenance_loop(self, stop_event: threading.Event) -> None:
-        """Retry settlements and stop time jobs exactly when access expires."""
+        """Retry settlements; rental expiry does not stop accepted jobs."""
 
         while not stop_event.is_set():
             try:
                 now = _now()
-                expired = self.store.fetch(
-                    "SELECT id FROM jobs WHERE status='open' AND billing_mode IN ('time','vvip') "
-                    "AND access_until IS NOT NULL AND access_until<=?",
-                    (now,),
-                )
-                for (job_id,) in expired:
-                    self.store.exec_with_changes(
-                        "UPDATE jobs SET status='stopping' WHERE id=? AND status='open'",
-                        (job_id,),
-                    )
-                    self.schedule_stop_finalization(int(job_id))
-
                 pending = self.store.fetch(
                     "SELECT job_id FROM billing_outbox WHERE status='pending' AND next_retry_at<=? "
                     "ORDER BY next_retry_at LIMIT 20",

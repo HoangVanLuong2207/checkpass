@@ -966,7 +966,7 @@ class JobCreationRaceTest(unittest.TestCase):
         self.inner.exec("UPDATE jobs SET created_at=? WHERE id=?", (cutoff - 1, job_id))
         self.assertEqual(_prune_completed_jobs_before_today(self.inner, cutoff)["jobs"], 1)
 
-    def test_expired_time_job_is_not_available_for_new_claims(self) -> None:
+    def test_expired_time_job_remains_available_for_new_claims(self) -> None:
         now = time.time()
         expired_id = self.inner.exec(
             "INSERT INTO jobs (created_at,total,chunk_size,status,billing_mode,billing_state,access_until) "
@@ -989,7 +989,37 @@ class JobCreationRaceTest(unittest.TestCase):
 
         claim = master_server.select_fair_claim_candidate(self.inner, now, "satellite-a")
         self.assertIsNotNone(claim)
-        self.assertEqual(claim[1], active_id)
+        self.assertEqual(claim[1], expired_id)
+
+    def test_billing_maintenance_keeps_expired_rental_jobs_open(self) -> None:
+        now = time.time()
+        job_ids = []
+        for mode in ("time", "vvip"):
+            job_ids.append(self.inner.exec(
+                "INSERT INTO jobs (created_at,total,chunk_size,status,billing_mode,billing_state,access_until) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (now - 100, 1, 15, "open", mode, "settled", now - 1),
+            ))
+
+        stop_event = threading.Event()
+        with mock.patch.object(stop_event, "wait", side_effect=lambda _: stop_event.set()), mock.patch.object(
+            self.server, "schedule_stop_finalization"
+        ) as finalize:
+            self.server.billing_maintenance_loop(stop_event)
+        finalize.assert_not_called()
+        for job_id in job_ids:
+            self.assertEqual(
+                self.inner.fetchone("SELECT status FROM jobs WHERE id=?", (job_id,))[0], "open"
+            )
+            self.inner.exec(
+                "INSERT INTO chunks (job_id,idx,account,status) VALUES (?,?,?,?)",
+                (job_id, 0, json.dumps(["expired|pass"]), "pending"),
+            )
+            self.inner.exec("UPDATE jobs SET queue_type=billing_mode WHERE id=? AND billing_mode='vvip'", (job_id,))
+            queue = "vvip" if job_id == job_ids[1] else "normal"
+            claim = master_server.select_fair_claim_candidate(self.inner, now, "satellite-a", queue)
+            self.assertIsNotNone(claim)
+            self.assertEqual(claim[1], job_id)
 
     def test_sp1s_mode_never_falls_back_to_open_access_without_master_token(self) -> None:
         original_token = self.server.master_token
