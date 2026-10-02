@@ -966,6 +966,16 @@ class JobCreationRaceTest(unittest.TestCase):
         self.inner.exec("UPDATE jobs SET created_at=? WHERE id=?", (cutoff - 1, job_id))
         self.assertEqual(_prune_completed_jobs_before_today(self.inner, cutoff)["jobs"], 1)
 
+    def test_new_job_resets_satellite_idle_restart_timer(self) -> None:
+        self.store.block_once = False
+        self.server._satellite_idle_since = 0
+        self.server._satellite_idle_restarted = True
+        status, created = self.post("/api/jobs", {"text": "idle-reset|pass"})
+        self.assertEqual(status, 200)
+        self.assertTrue(created["job_id"])
+        self.assertIsNone(self.server._satellite_idle_since)
+        self.assertFalse(self.server._satellite_idle_restarted)
+
     def test_expired_time_job_remains_available_for_new_claims(self) -> None:
         now = time.time()
         expired_id = self.inner.exec(

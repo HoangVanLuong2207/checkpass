@@ -3317,6 +3317,8 @@ class MasterHandler(BaseHTTPRequestHandler):
                         job_id = int(row[0])
                 if not job_id:
                     raise RuntimeError("không lấy được job_id sau khi tạo")
+                self.server._satellite_idle_since = None
+                self.server._satellite_idle_restarted = False
                 stmts = []
                 for idx, accounts_json in enumerate(chunk_payloads):
                     stmts.append({
@@ -4130,6 +4132,8 @@ class CoordinatorServer(ThreadingHTTPServer):
         self.master_token = master_token
         self.claim_lock = threading.Lock()
         self.job_creation_lock = threading.Lock()
+        self._satellite_idle_since: float | None = None
+        self._satellite_idle_restarted = False
         self.stop_lock = threading.Lock()
         self._stopping_jobs_lock = threading.Lock()
         self._stopping_jobs: set[int] = set()
@@ -4381,6 +4385,57 @@ class CoordinatorServer(ThreadingHTTPServer):
             self.schedule_billing(int(job_id))
         return len(rows)
 
+    def restart_idle_satellites(self) -> None:
+        """Restart configured satellites once after five continuous idle minutes."""
+        # Serialize with job admission so a job cannot open during dispatch.
+        with self.job_creation_lock:
+            now = time.monotonic()
+            active = self.store.fetchone(
+                "SELECT id FROM jobs WHERE status IN ('creating','open','stopping') LIMIT 1"
+            )
+            if active is not None:
+                self._satellite_idle_since = None
+                self._satellite_idle_restarted = False
+                return
+            if self._satellite_idle_since is None:
+                self._satellite_idle_since = now
+                return
+            if self._satellite_idle_restarted or now - self._satellite_idle_since < 300:
+                return
+            control_token = os.environ.get("SATELLITE_CONTROL_TOKEN", "").strip() or self.master_token.strip()
+            targets = parse_satellite_targets(
+                _setting(self.store, "satellite_targets", DEFAULT_SATELLITE_TARGETS)
+            ) + parse_satellite_targets(
+                _setting(self.store, "vvip_satellite_targets", DEFAULT_VVIP_SATELLITE_TARGETS)
+            )
+            unique = {target["url"].rstrip("/").lower(): target for target in targets}
+            if not control_token or not unique:
+                return
+            # Failed targets are logged, without repeatedly restarting healthy ones.
+            self._satellite_idle_restarted = True
+            with ThreadPoolExecutor(max_workers=min(12, len(unique))) as pool:
+                futures = {
+                    pool.submit(restart_satellite, target, control_token): target
+                    for target in unique.values()
+                }
+                for future in as_completed(futures):
+                    target = futures[future]
+                    try:
+                        future.result()
+                        print(f"[master] idle 5m: restart sent to {target['label']}", flush=True)
+                    except Exception as exc:
+                        print(f"[master] idle restart failed for {target['label']}: {exc}", flush=True)
+
+    def satellite_idle_maintenance_loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                self.restart_idle_satellites()
+            except Exception as exc:
+                # An unobserved interval cannot establish continuous idleness.
+                self._satellite_idle_since = None
+                print(f"[master] satellite idle maintenance error: {exc}", flush=True)
+            stop_event.wait(5)
+
     def billing_maintenance_loop(self, stop_event: threading.Event) -> None:
         """Retry settlements; rental expiry does not stop accepted jobs."""
 
@@ -4495,6 +4550,14 @@ def main() -> int:
         daemon=True,
     )
     billing_thread.start()
+    satellite_idle_stop = threading.Event()
+    satellite_idle_thread = threading.Thread(
+        target=server.satellite_idle_maintenance_loop,
+        args=(satellite_idle_stop,),
+        name="master-satellite-idle-maintenance",
+        daemon=True,
+    )
+    satellite_idle_thread.start()
     retention_stop = threading.Event()
     retention_thread = threading.Thread(
         target=_retention_cleanup_loop,
@@ -4524,6 +4587,8 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[master] Đã dừng.")
     finally:
+        satellite_idle_stop.set()
+        satellite_idle_thread.join(timeout=2)
         billing_stop.set()
         billing_thread.join(timeout=3)
         keepawake_stop.set()
