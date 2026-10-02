@@ -501,6 +501,15 @@ body {
   color: var(--text);
   line-height: 1.15;
 }
+.overview-running-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.overview-running-breakdown strong { color: var(--text); }
 .overview-label {
   font-size: 12px;
   color: var(--text-muted);
@@ -1665,6 +1674,10 @@ table.data-table tbody tr:hover {
         <div class="overview-info">
           <div class="overview-num" id="topRunningJobs">0</div>
           <div class="overview-label">Jobs đang chạy</div>
+          <div class="overview-running-breakdown">
+            <span>Thường: <strong id="topNormalRunningJobs">0</strong></span>
+            <span>VVIP: <strong id="topVvipRunningJobs">0</strong></span>
+          </div>
         </div>
       </div>
       <div class="overview-card">
@@ -2738,13 +2751,19 @@ function updateOverviewStats(jobs, overview) {
   const hasSystemOverview = overview && typeof overview === 'object';
   let totalJobs = hasSystemOverview ? Number(overview.total_jobs || 0) : jobs.length;
   let running = hasSystemOverview ? Number(overview.running_jobs || 0) : 0;
+  let normalRunning = hasSystemOverview ? Number(overview.normal_running_jobs || 0) : 0;
+  let vvipRunning = hasSystemOverview ? Number(overview.vvip_running_jobs || 0) : 0;
   let done = hasSystemOverview ? Number(overview.done_jobs || 0) : 0;
   let totalAccs = hasSystemOverview ? Number(overview.total_accounts || 0) : 0;
   let pendingAccs = hasSystemOverview ? Number(overview.pending_accounts || 0) : 0;
   if (!hasSystemOverview) {
     jobs.forEach(j => {
       if (j.status === 'done') done++;
-      else running++;
+      else {
+        running++;
+        if (j.queue_type === 'vvip') vvipRunning++;
+        else normalRunning++;
+      }
       totalAccs += Number(j.total || 0);
       if (j.status !== 'done') {
         pendingAccs += Math.max(0, Number(j.total || 0) - Number(j.processed || 0));
@@ -2753,6 +2772,8 @@ function updateOverviewStats(jobs, overview) {
   }
   document.getElementById('topTotalJobs').textContent = formatNumber(totalJobs);
   document.getElementById('topRunningJobs').textContent = formatNumber(running);
+  document.getElementById('topNormalRunningJobs').textContent = formatNumber(normalRunning);
+  document.getElementById('topVvipRunningJobs').textContent = formatNumber(vvipRunning);
   document.getElementById('topDoneJobs').textContent = formatNumber(done);
   document.getElementById('topTotalAccs').textContent = formatNumber(totalAccs);
   document.getElementById('topPendingAccs').textContent = formatNumber(Math.max(0, pendingAccs));

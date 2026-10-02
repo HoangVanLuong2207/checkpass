@@ -400,7 +400,28 @@ class JobCreationRaceTest(unittest.TestCase):
             "done_jobs": 1,
             "total_accounts": 350,
             "processed_accounts": 2,
+            "pending_accounts": 99,
+            "normal_running_jobs": 1,
+            "vvip_running_jobs": 0,
         })
+
+    def test_overview_splits_active_jobs_by_queue_across_owners(self) -> None:
+        for queue in ("normal", "vvip"):
+            for status in ("creating", "open", "stopping", "done"):
+                self.inner.exec(
+                    "INSERT INTO jobs (created_at,total,chunk_size,status,queue_type,owner_hash) "
+                    "VALUES (?,?,?,?,?,?)",
+                    (1, 1, 1, status, queue, "other-owner"),
+                )
+        handler = object.__new__(MasterHandler)
+        handler.server = self.server
+        captured = {}
+        handler._json = lambda status, payload: captured.update(payload)
+        handler._handle_jobs_list({"owner_hash": "owner-a", "is_admin": False})
+        self.assertEqual(captured["jobs"], [])
+        self.assertEqual(captured["overview"]["running_jobs"], 6)
+        self.assertEqual(captured["overview"]["normal_running_jobs"], 3)
+        self.assertEqual(captured["overview"]["vvip_running_jobs"], 3)
 
     def test_jobs_list_uses_constant_number_of_database_reads(self) -> None:
         for index in range(12):

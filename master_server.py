@@ -2986,8 +2986,12 @@ class MasterHandler(BaseHTTPRequestHandler):
             "SUM(total_accounts), SUM(result_count), "
             "SUM(CASE "
             "WHEN job_status IN ('creating','open','stopping') AND total_accounts>result_count "
-            "THEN total_accounts-result_count ELSE 0 END) "
-            "FROM job_stats"
+            "THEN total_accounts-result_count ELSE 0 END), "
+            "SUM(CASE WHEN job_status IN ('creating','open','stopping') "
+            "AND COALESCE(j.queue_type,'normal')='normal' THEN 1 ELSE 0 END), "
+            "SUM(CASE WHEN job_status IN ('creating','open','stopping') "
+            "AND j.queue_type='vvip' THEN 1 ELSE 0 END) "
+            "FROM job_stats s JOIN jobs j ON j.id=s.job_id"
         )
         overview = {
             "total_jobs": int((overview_row[0] if overview_row else 0) or 0),
@@ -2996,6 +3000,8 @@ class MasterHandler(BaseHTTPRequestHandler):
             "total_accounts": int((overview_row[3] if overview_row else 0) or 0),
             "processed_accounts": int((overview_row[4] if overview_row else 0) or 0),
             "pending_accounts": int((overview_row[5] if overview_row else 0) or 0),
+            "normal_running_jobs": int((overview_row[6] if overview_row else 0) or 0),
+            "vvip_running_jobs": int((overview_row[7] if overview_row else 0) or 0),
         }
         select_sql = (
             "SELECT j.id,j.created_at,j.total,j.chunk_size,j.status,j.finished_at,j.owner_preview,"
